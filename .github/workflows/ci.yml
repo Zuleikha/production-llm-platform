@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned to match the local toolchain and the Dockerfile (see ADR 0001).
+  UV_VERSION: "0.11.28"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  quality:
+    name: Lint, type check, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      # --frozen: fail if uv.lock is out of sync with pyproject.toml, rather
+      # than silently re-resolving. Keeps CI reproducible.
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # Each step below fails the job on a non-zero exit — lint or test
+      # failures block the build.
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Format check (ruff)
+        run: uv run ruff format --check .
+
+      - name: Type check (mypy strict)
+        run: uv run mypy
+
+      - name: Unit tests (pytest)
+        env:
+          ENVIRONMENT: test
+        run: uv run pytest -v
+
+  docker:
+    name: Docker build + health verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Verification bar: it is not enough for the image to build — the running
+      # container must serve GET /health with 200.
+      - name: Build api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: production-llm-platform/api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run container
+        run: |
+          docker run -d --name api-ci -p 8000:8000 \
+            -e ENVIRONMENT=prod \
+            production-llm-platform/api:ci
+
+      - name: Wait for /health to return 200
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health || true)
+            if [ "$code" = "200" ]; then
+              echo "health OK after ${i}s"
+              curl -s http://localhost:8000/health
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::/health did not return 200 within 30s"
+          docker logs api-ci
+          exit 1
+
+      - name: Verify /ready, /version and /metrics
+        run: |
+          set -euo pipefail
+          curl -fsS http://localhost:8000/ready | tee /dev/stderr | grep -q '"status":"ready"'
+          curl -fsS http://localhost:8000/version | tee /dev/stderr | grep -q '"service":"api"'
+          curl -fsS http://localhost:8000/metrics | grep -q 'http_requests_total'
+
+      - name: Container logs (always)
+        if: always()
+        run: docker logs api-ci || true
+
+      - name: Tear down
+        if: always()
+        run: docker rm -f api-ci || true

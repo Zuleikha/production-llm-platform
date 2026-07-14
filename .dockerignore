@@ -1,0 +1,32 @@
+# Keep the Docker build context small and reproducible.
+.git/
+.github/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+
+# Docs & local-only assets — not needed inside the image.
+docs/
+examples/
+tests/
+infrastructure/kubernetes/
+infrastructure/terraform/
+*.md
+!README.md
+
+# Environment / secrets must never enter the image.
+.env
+.env.*
+!config/environments/*.env
+
+# Local editor/OS cruft.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

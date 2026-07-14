@@ -1,0 +1,16 @@
+# Dashboard provider. Dashboards themselves are planned, not yet implemented
+# (Stage 5 — observability); this establishes the provisioning path so Stage 5
+# only needs to drop JSON dashboard files into ./dashboards.
+apiVersion: 1
+
+providers:
+  - name: platform
+    orgId: 1
+    folder: production-llm-platform
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

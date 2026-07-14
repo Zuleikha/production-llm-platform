@@ -1,0 +1,22 @@
+# Prometheus scrape configuration for the local Compose stack.
+# The api service exposes the Prometheus text format at /metrics (Stage 1).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    platform: production-llm-platform
+
+# Alerting rules are planned, not yet implemented (Stage 5 — observability).
+rule_files: []
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]
+        labels:
+          service: api

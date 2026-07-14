@@ -1,0 +1,35 @@
+# Pre-commit hooks — run `uv run pre-commit install` once, then they run on every commit.
+# Versions are pinned to match the tools declared in pyproject.toml (see ADR 0001).
+minimum_pre_commit_version: "4.0.0"
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.21
+    hooks:
+      - id: ruff-check
+        args: ["--fix"]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v2.3.0
+    hooks:
+      - id: mypy
+        # Strict config lives in pyproject.toml; give the hook the deps it needs
+        # to type-check our imports without a full project install.
+        additional_dependencies:
+          - "pydantic==2.13.4"
+          - "pydantic-settings==2.14.2"
+        args: ["--config-file=pyproject.toml"]
+        files: ^(services|shared|tests)/
