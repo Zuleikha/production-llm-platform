@@ -13,7 +13,6 @@ does real dependency probes (503 when any is unavailable). **No LLM call is
 made** — the endpoint is backed by a deterministic `EchoEngine` behind a
 `CompletionEngine` protocol that Stage 3 swaps out. **No agent, RAG or auth
 exists yet**; those folders are stubs that raise `NotImplementedError`.
-
 Datastores are connected and probed but **nothing is persisted** — no schema,
 migrations, cache use, or vector ops.
 
@@ -25,15 +24,14 @@ Why anything is the way it is: **`docs/adr/`** (0001 stack, 0002 structure,
 ## Layout
 
 ```
-services/api/      ✅ the only implemented service
-                   app.py · routes/{health,meta,chat}.py · schemas.py ·
-                   completions.py (CompletionEngine seam) · errors.py · middleware.py
+services/api/      ✅ only implemented service. app.py · routes/{health,meta,chat}
+                   schemas.py · completions.py (CompletionEngine seam) · errors · middleware
 services/{agents,orchestrator,retrieval,evaluation,monitoring,security}/  ⬜ stubs
-shared/            config.py · logging.py · observability.py · version.py · datastores.py
+shared/            config · logging · observability · version · datastores
 config/environments/{dev,test,prod}.env    committed, NON-SECRET defaults
-tests/             a package (__init__.py); fakes.py holds shared test doubles
-tests/unit/        mirrors source layout
-docs/              architecture · adr · runbooks · stage-summaries · prompts
+tests/             a package (__init__.py); fakes.py = shared test doubles; unit/ mirrors source
+docs/              architecture · adr · runbooks · stage-summaries · verification-log · prompts
+architecture.html  GENERATED from docs/architecture.md — see Conventions
 infrastructure/    docker ✅ · kubernetes ⬜ · terraform ⬜
 ```
 
@@ -43,8 +41,8 @@ infrastructure/    docker ✅ · kubernetes ⬜ · terraform ⬜
   an ABC/Protocol whose methods `raise NotImplementedError`. Never a working
   mini-version.
 - **Naming:** `snake_case` modules/functions, `PascalCase` classes, `_private`.
-  ADRs `NNNN-kebab-title.md`. Stage summaries have **fixed** filenames — see
-  PROJECT_STATUS.
+  ADRs `NNNN-kebab-title.md`. Stage summaries + verification logs have **fixed**
+  filenames — see PROJECT_STATUS.
 - **Config:** one `Settings` (pydantic-settings) in `shared/config.py`, read via
   `get_settings()` (`lru_cache`d), injected with `Depends(get_settings)`.
   Precedence: OS env > `.env` > `config/environments/<ENVIRONMENT>.env` >
@@ -53,10 +51,9 @@ infrastructure/    docker ✅ · kubernetes ⬜ · terraform ⬜
   all three datastore URLs** and refuses to construct without them; the `test`
   profile ignores the root `.env` to stay hermetic.
 - **Datastores:** `DatastoreRegistry.from_settings()` on `app.state.datastores`,
-  read via the `get_datastores` dependency. A store with no URL is
-  `not_configured` and never dialled. `startup()` is concurrent and **never
-  raises** — failures surface on `/ready`, not as a crash loop. `/health` must
-  **never** probe a dependency (a tripwire test enforces this).
+  via the `get_datastores` dependency. No URL = `not_configured`, never dialled.
+  `startup()` is concurrent and **never raises** — failures surface on `/ready`,
+  not as a crash loop. `/health` must **never** probe (tripwire test enforces).
 - **Chat:** routes call the `CompletionEngine` protocol on `app.state.engine`
   (`get_engine` dependency), never `services.orchestrator` directly. Stage 2's
   `EchoEngine` is a mock; Stage 3 substitutes behind the same protocol.
@@ -64,9 +61,8 @@ infrastructure/    docker ✅ · kubernetes ⬜ · terraform ⬜
   `_logger.info("http.request", extra={...})`. One JSON object per line with
   `timestamp, level, service, environment, request_id, logger, message` (+
   `exception` trace on errors). Never log PII/secrets/tokens.
-- **Tracing:** `@traced` on new application functions. **Exempt:**
-  `shared/logging.py` + `shared/observability.py` (recursion), and async
-  generators/lifespan.
+- **Tracing:** `@traced` on new application functions. **Exempt:** `shared/logging.py`
+  + `shared/observability.py` (recursion), and async generators/lifespan.
 - **Errors:** fail loud. Uniform envelope `{"error": {type, message, request_id}}`.
   500s never leak internals. Handlers registered against **Starlette's**
   `HTTPException` (its base), so unmatched-route 404s are caught.
@@ -77,6 +73,9 @@ infrastructure/    docker ✅ · kubernetes ⬜ · terraform ⬜
 - **Tests:** `tests/unit/`, mirror source. Test contracts, not internals. Write the
   failing test first; never edit a test to make it pass. Switching profiles needs
   `monkeypatch.setenv` **+** `get_settings.cache_clear()`.
+- **Architecture doc:** `docs/architecture.md` is the source; `architecture.html`
+  (repo root, visual, Mermaid) is **generated** by `scripts/build_architecture.py`.
+  Never edit the HTML. **Every stage updates the md + regenerates** — test fails on drift.
 
 ## Run / test / lint
 
@@ -90,6 +89,8 @@ pwsh scripts/verify.ps1   # or ./scripts/verify.sh — the whole gate
 uv run ruff check . --fix ; uv run ruff format .
 uv run mypy               # strict
 uv run pytest -v
+
+uv run python scripts/build_architecture.py   # regenerate architecture.html
 ```
 
 Endpoints: `/health` `/ready` `/version` `/metrics` `/docs`

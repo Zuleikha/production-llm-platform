@@ -36,7 +36,8 @@ untouched stub.
 | **Fail-loud prod config** | A `Settings` validator requires all three datastore URLs under `prod` — a missing `DATABASE_URL` now fails at boot, naming the variable, instead of reading as `not_configured` and silently passing readiness (ADR 0005) |
 | **Hermetic test profile** | The `test` profile ignores the repo-root `.env`, so a developer who copied `.env.example` cannot make the suite dial a live Postgres |
 | **CI verifies the real thing** | The docker job now runs postgres/redis/qdrant service containers, so `/ready` is asserted to report each store `ok` — a stubbed probe would fail it. Adds chat + SSE assertions |
-| **Quality gate** | ruff, mypy strict, **56 tests** (was 21) |
+| **Visual architecture doc** | `architecture.html` at the repo root — generated from `docs/architecture.md` with rendered Mermaid diagrams (component map, liveness-vs-readiness flow, chat/SSE sequence, datastore lifecycle). Regenerated every stage; a test fails on drift (§ 7) |
+| **Quality gate** | ruff, mypy strict, **60 tests** (was 21) |
 
 ## 3. Files created or modified
 
@@ -53,6 +54,16 @@ tests/unit/test_chat.py                     15 tests
 tests/{__init__,unit/__init__}.py           make `tests` a real package (see § 7)
 docs/adr/0004-streaming-transport.md
 docs/adr/0005-datastore-connection-pooling.md
+scripts/build_architecture.py               architecture.md -> architecture.html
+architecture.html                           GENERATED — do not edit
+tests/unit/test_architecture.py             4 tests; fails if the HTML drifts
+```
+
+**Modified (docs)**
+
+```
+docs/architecture.md        was still entirely Stage 1 — see § 7
+CLAUDE.md                   regeneration convention; quirks merged
 ```
 
 **Modified**
@@ -294,6 +305,18 @@ $ git check-ignore -v .env
 
 ## 7. Technical debt
 
+- **`docs/architecture.md` was missed during the stage and caught afterwards.**
+  It still described Stage 1 in full — `/ready` as `checks: {}`, datastores as
+  "NOT connected to the app yet", and chat/streaming/datastore wiring under
+  "Planned". `CLAUDE.md` and `PROJECT_STATUS.md` were updated; this one was not,
+  and nothing flagged it. Now rewritten for Stage 2, and it is the source for the
+  new `architecture.html`. **The real lesson:** three docs described the same
+  state and only a human noticing caught the third. The drift test now covers
+  md→html, but nothing yet enforces that `architecture.md` matches reality — that
+  still relies on the stage checklist.
+- **`architecture.html` is generated, and Mermaid loads from a pinned CDN.**
+  Offline, the prose renders but diagrams stay as text. Inlining ~3MB of vendored
+  JS into every diff was judged the worse trade.
 - **`tests/` became a package.** `tests/__init__.py` and `tests/unit/__init__.py`
   were added because mypy saw `tests/fakes.py` under two module names
   (`fakes` and `tests.fakes`) via PEP 420 namespace resolution. This is mypy's

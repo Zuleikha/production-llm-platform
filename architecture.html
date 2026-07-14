@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture — production-llm-platform</title>
+<!-- GENERATED FILE - DO NOT EDIT. Source: docs/architecture.md
+     Regenerate: uv run python scripts/build_architecture.py -->
+<style>
+:root {
+  --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --border: #d1d9e0;
+  --accent: #0969da; --code-bg: #f6f8fa; --quote-bg: #f6f8fa;
+  --table-stripe: #f6f8fa;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --border: #3d444d;
+    --accent: #4493f8; --code-bg: #151b23; --quote-bg: #151b23;
+    --table-stripe: #151b23;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 2rem 1rem 6rem; background: var(--bg); color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans",
+               Helvetica, Arial, sans-serif;
+  line-height: 1.6; font-size: 16px;
+}
+main { max-width: 980px; margin: 0 auto; }
+h1, h2, h3 { line-height: 1.25; margin-top: 2rem; margin-bottom: 1rem; font-weight: 600; }
+h1 { font-size: 2rem; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+h2 { font-size: 1.5rem; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+h3 { font-size: 1.25rem; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+  background: var(--code-bg); padding: .2em .4em; border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: .875em;
+}
+pre {
+  background: var(--code-bg); padding: 1rem; border-radius: 6px;
+  overflow-x: auto; max-width: 100%;
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1rem 0; padding: .75rem 1rem; border-left: .25em solid var(--border);
+  background: var(--quote-bg); color: var(--muted); border-radius: 0 6px 6px 0;
+}
+blockquote > :first-child { margin-top: 0; }
+blockquote > :last-child { margin-bottom: 0; }
+/* Wide tables scroll inside their own container so the page never does. */
+.table-scroll { overflow-x: auto; margin: 1rem 0; }
+table { border-collapse: collapse; width: 100%; }
+th, td {
+  border: 1px solid var(--border); padding: .5rem .75rem;
+  text-align: left; vertical-align: top;
+}
+th { background: var(--table-stripe); font-weight: 600; }
+tr:nth-child(2n) td { background: var(--table-stripe); }
+hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }
+/* Diagrams keep their natural size (see mermaid useMaxWidth:false) and scroll
+   inside this box, so the page body never scrolls sideways. */
+.mermaid {
+  margin: 1.5rem 0; padding: 1rem 0; overflow-x: auto;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--code-bg);
+}
+.mermaid svg { display: block; margin: 0 auto; height: auto; }
+.build-stamp {
+  margin: 0 auto 2rem; max-width: 980px; color: var(--muted); font-size: .8125rem;
+  border: 1px dashed var(--border); border-radius: 6px; padding: .5rem .75rem;
+}
+.build-stamp code { font-size: .8125em; }
+</style>
+</head>
+<body>
+<div class="build-stamp">
+  <strong>Generated file — do not edit.</strong>
+  Rendered from <code>docs/architecture.md</code> by
+  <code>scripts/build_architecture.py</code>. Built 2026-07-14.
+</div>
+<main>
+<h1>Architecture</h1>
+<blockquote>
+<p><strong>Reading rule for this document.</strong> Everything under <strong>Current state</strong> exists
+and is tested today. Everything under <strong>Planned</strong> is <strong>not yet implemented</strong> —
+it is described as intent, not as built software. Do not infer capability from
+a folder existing.</p>
+<p><strong>This file is the source of truth.</strong> <code>architecture.html</code> at the repo root is
+generated from it (<code>uv run python scripts/build_architecture.py</code>) and a test
+fails if the two drift. Edit this file, never the HTML.</p>
+</blockquote>
+<p><strong>Stage 2 of 10 (API).</strong> The platform today is a FastAPI service that serves a
+chat completion endpoint with SSE streaming, holds pooled connections to
+Postgres, Redis and Qdrant, and reports honest readiness by probing them.</p>
+<p><strong>No LLM is called yet.</strong> The chat endpoint is backed by a deterministic
+<code>EchoEngine</code> behind a <code>CompletionEngine</code> protocol — the seam Stage 3 fills.</p>
+<hr />
+<h2>Current state (Stage 2 — built and verified)</h2>
+<h3>Component map</h3>
+<pre class="mermaid">flowchart TD
+    client([HTTP client])
+
+    subgraph api["api service (FastAPI)"]
+        direction TB
+        mw["RequestContextMiddleware&lt;br/&gt;request-id · metrics · access log"]
+        routes["routes: health · meta · chat"]
+        engine["CompletionEngine&lt;br/&gt;EchoEngine — mock&lt;br/&gt;Stage 3 swaps this"]
+        registry["DatastoreRegistry&lt;br/&gt;pools · lifespan · probe"]
+
+        mw --&gt; routes
+        routes --&gt;|"POST /v1/chat/completions"| engine
+        routes --&gt;|"GET /ready"| registry
+    end
+
+    pg[("postgres&lt;br/&gt;asyncpg pool")]
+    rd[("redis&lt;br/&gt;redis.asyncio pool")]
+    qd[("qdrant&lt;br/&gt;httpx → /readyz")]
+
+    client --&gt; mw
+    registry --&gt; pg
+    registry --&gt; rd
+    registry --&gt; qd
+
+    prom["prometheus"] --&gt;|"scrapes /metrics"| api
+    graf["grafana"] --&gt;|"datasource"| prom
+
+    classDef mock fill:#fff4e6,stroke:#e8a33d,color:#7a4a00
+    classDef store fill:#e8f4ff,stroke:#4a90d9,color:#0a3d62
+    class engine mock
+    class pg,rd,qd store
+</pre>
+<p><code>shared/</code> (<code>config</code> · <code>logging</code> · <code>observability</code> · <code>datastores</code> · <code>version</code>) is
+imported throughout the service rather than sitting in the request path — it is
+left out of the diagram above to keep the flow readable.</p>
+<p>Postgres, Redis and Qdrant are <strong>connected and probed</strong>, but nothing is
+persisted yet — no schema, migrations, cache reads/writes or vector operations.</p>
+<h3>The <code>api</code> service</h3>
+<div class="table-scroll"><table><thead>
+<tr>
+<th>Endpoint</th>
+<th>Purpose</th>
+<th>Behaviour today</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /health</code></td>
+<td>Liveness</td>
+<td><code>200</code> + service, version, environment. <strong>Touches no datastore.</strong></td>
+</tr>
+<tr>
+<td><code>GET /ready</code></td>
+<td>Readiness</td>
+<td><code>200</code> <code>ready</code> + per-store checks; <strong><code>503</code> <code>not_ready</code></strong> if any configured store is unavailable</td>
+</tr>
+<tr>
+<td><code>GET /version</code></td>
+<td>Identity</td>
+<td><code>200</code> + service, version, environment</td>
+</tr>
+<tr>
+<td><code>GET /metrics</code></td>
+<td>Prometheus</td>
+<td>request count + latency histogram</td>
+</tr>
+<tr>
+<td><code>GET /docs</code></td>
+<td>OpenAPI UI</td>
+<td>generated by FastAPI</td>
+</tr>
+<tr>
+<td><code>POST /v1/chat/completions</code></td>
+<td>Chat</td>
+<td><code>200</code> completion, or an SSE stream when <code>&quot;stream&quot;: true</code></td>
+</tr>
+</tbody>
+</table></div><p><strong>Request path:</strong> <code>RequestContextMiddleware</code> assigns/propagates an
+<code>X-Request-ID</code> (honouring an inbound header), binds it to a <code>ContextVar</code>, times
+the request, records Prometheus metrics against the <strong>route template</strong> (not the
+raw path, to bound label cardinality), echoes the id on the response, and emits a
+structured access log.</p>
+<p><strong>Error handling:</strong> every failure returns one envelope —
+<code>{&quot;error&quot;: {&quot;type&quot;, &quot;message&quot;, &quot;request_id&quot;}}</code>. Handlers are registered for
+<code>HTTPException</code> (Starlette's base, so unmatched-route 404s are covered),
+<code>RequestValidationError</code> (422), and a catch-all <code>Exception</code> that logs the full
+trace and returns a generic 500 that never leaks internals.</p>
+<p><strong>Lifecycle:</strong> an async <code>lifespan</code> logs <code>service.startup</code> / <code>service.shutdown</code>
+and opens/closes the datastore pools.</p>
+<h3>Liveness vs readiness</h3>
+<p>The distinction is load-bearing, not pedantry — see ADR 0005.</p>
+<pre class="mermaid">flowchart TD
+    h["GET /health"] --&gt; hq{"is the process&lt;br/&gt;serving?"}
+    hq --&gt;|yes| h200["200 ok"]
+    hq --&gt;|no| hdead["no response&lt;br/&gt;&lt;i&gt;→ orchestrator restarts&lt;/i&gt;"]
+
+    r["GET /ready"] --&gt; probe["probe every configured store&lt;br/&gt;&lt;i&gt;concurrently, each timeout-bounded&lt;/i&gt;"]
+    probe --&gt; rq{"any store&lt;br/&gt;unavailable?"}
+    rq --&gt;|no| r200["200 ready&lt;br/&gt;{postgres:ok, redis:ok, qdrant:ok}"]
+    rq --&gt;|yes| r503["503 not_ready&lt;br/&gt;&lt;i&gt;→ traffic routed away,&lt;br/&gt;container NOT killed&lt;/i&gt;"]
+
+    note["/health never probes a dependency:&lt;br/&gt;a database blip must not become&lt;br/&gt;a pod restart storm"]
+
+    classDef bad fill:#ffe9e9,stroke:#d95a5a,color:#7a0000
+    classDef good fill:#e9f7ec,stroke:#4caf7d,color:#0a4a2a
+    classDef nte fill:#f4f4f4,stroke:#999,color:#333
+    class r503,hdead bad
+    class h200,r200 good
+    class note nte
+</pre>
+<h3>Chat completion and streaming</h3>
+<p>Both paths run the <strong>same</strong> <code>CompletionEngine</code>, so streaming is purely a
+transport choice and cannot change the answer (a test asserts the streamed and
+non-streamed bodies are identical). SSE framing is specified in ADR 0004.</p>
+<pre class="mermaid">sequenceDiagram
+    participant C as client
+    participant R as routes/chat.py
+    participant E as CompletionEngine&lt;br/&gt;(EchoEngine)
+
+    C-&gt;&gt;R: POST /v1/chat/completions
+    Note over R: Pydantic validation&lt;br/&gt;≥1 message · role enum&lt;br/&gt;max_tokens &gt; 0 · 0 ≤ temp ≤ 2
+
+    alt stream = false
+        R-&gt;&gt;E: complete(messages)
+        E--&gt;&gt;R: full text
+        R--&gt;&gt;C: 200 {"object":"chat.completion", choices, usage}
+    else stream = true
+        R--&gt;&gt;C: 200 text/event-stream
+        R-&gt;&gt;E: stream(messages)
+        E--&gt;&gt;R: "You"
+        R--&gt;&gt;C: data: {delta:{role:"assistant",content:"You"}}
+        E--&gt;&gt;R: " said:"
+        R--&gt;&gt;C: data: {delta:{content:" said:"}}
+        R--&gt;&gt;C: data: {delta:{}, finish_reason:"stop"}
+        R--&gt;&gt;C: data: [DONE]
+    end
+</pre>
+<h3><code>shared/</code> foundation</h3>
+<div class="table-scroll"><table><thead>
+<tr>
+<th>Module</th>
+<th>Responsibility</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>config.py</code></td>
+<td>Typed <code>Settings</code> (pydantic-settings), layered profiles — see ADR 0003. <code>prod</code> refuses to boot without all three datastore URLs</td>
+</tr>
+<tr>
+<td><code>logging.py</code></td>
+<td>JSON formatter (<code>timestamp</code>, <code>level</code>, <code>service</code>, <code>environment</code>, <code>request_id</code>, <code>logger</code>, <code>message</code>, <code>exception</code>) + console formatter; routes uvicorn logs through one handler</td>
+</tr>
+<tr>
+<td><code>observability.py</code></td>
+<td><code>@traced</code> — logs span enter/exit/duration/error; sync + async; PEP 695 typed</td>
+</tr>
+<tr>
+<td><code>datastores.py</code></td>
+<td><code>Datastore</code> ABC + Postgres/Redis/Qdrant implementations and <code>DatastoreRegistry</code> — see ADR 0005</td>
+</tr>
+<tr>
+<td><code>version.py</code></td>
+<td><code>__version__</code>, kept in sync with <code>pyproject.toml</code> by a test</td>
+</tr>
+</tbody>
+</table></div><h3>Datastore lifecycle</h3>
+<pre class="mermaid">stateDiagram-v2
+    [*] --&gt; Unconfigured: no URL
+    [*] --&gt; Configured: URL set
+
+    Unconfigured --&gt; NotConfigured: never dialled
+    NotConfigured --&gt; [*]: reports "not_configured"&lt;br/&gt;does not block readiness
+
+    Configured --&gt; Connecting: lifespan startup&lt;br/&gt;(all stores concurrently)
+    Connecting --&gt; Connected: pool opened
+    Connecting --&gt; Failed: connect raised&lt;br/&gt;&lt;i&gt;logged, NOT propagated&lt;/i&gt;
+
+    Connected --&gt; Connected: ping ok → "ok"
+    Connected --&gt; Blip: ping fails → "unavailable"
+    Blip --&gt; Connected: driver pool reconnects
+
+    Failed --&gt; Failed: reports "unavailable"&lt;br/&gt;until process restart
+
+    Connected --&gt; [*]: shutdown closes pool
+    Failed --&gt; [*]: shutdown
+</pre>
+<p>Startup <strong>never raises</strong>: an unreachable store yields a diagnosable un-ready pod
+rather than a crash loop. Connects run concurrently — serialised, three dead
+stores delayed <code>/health</code> by ~20s (measured), long enough to trip a liveness probe
+and cause the very crash loop the design avoids.</p>
+<h3>Infrastructure (Docker Compose)</h3>
+<p><code>api</code> (built, non-root, multi-stage), <code>postgres</code>, <code>redis</code>, <code>qdrant</code>,
+<code>prometheus</code> (scrapes <code>api:8000/metrics</code>), <code>grafana</code> (Prometheus datasource
+provisioned as code). Postgres and Redis gate <code>api</code> startup via healthchecks.
+Grafana is on host port <strong>3001</strong> (3000 collides with an unrelated local
+container — see CLAUDE.md).</p>
+<h3>Quality gate</h3>
+<p>ruff (lint + format) · mypy <code>strict</code> · pytest (56 tests) · pre-commit · GitHub
+Actions running the same commands, <strong>plus</strong> a Docker job that boots the container
+against live postgres/redis/qdrant service containers and fails unless <code>/ready</code>
+reports every store <code>ok</code> and the chat + SSE contract holds.</p>
+<hr />
+<h2>Planned — not yet implemented</h2>
+<p>Each item below is a <strong>contract or empty folder only</strong> today. The owning stage
+builds it.</p>
+<div class="table-scroll"><table><thead>
+<tr>
+<th>Component</th>
+<th>Stage</th>
+<th>Status today</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>services/agents</code> — <code>Agent</code> ABC</td>
+<td>3</td>
+<td><strong>Not implemented.</strong> <code>run()</code> raises <code>NotImplementedError</code>.</td>
+</tr>
+<tr>
+<td><code>services/orchestrator</code> — <code>Orchestrator</code> ABC (LangGraph); real model calls behind <code>CompletionEngine</code></td>
+<td>3</td>
+<td><strong>Not implemented.</strong> Raises. <code>EchoEngine</code> is the mock in its place.</td>
+</tr>
+<tr>
+<td>Conversation state (Postgres schema/migrations), caching (Redis)</td>
+<td>3</td>
+<td><strong>Not implemented.</strong> Both are connected but unused.</td>
+</tr>
+<tr>
+<td><code>services/retrieval</code> — <code>Retriever</code> Protocol, <code>VectorStore</code> ABC (LlamaIndex + Qdrant)</td>
+<td>4</td>
+<td><strong>Not implemented.</strong> Raises. Qdrant is reached only for <code>GET /readyz</code> and holds no data.</td>
+</tr>
+<tr>
+<td><code>services/monitoring</code> — <code>SpanExporter</code>; OpenTelemetry export, Grafana dashboards, alerts</td>
+<td>5</td>
+<td><strong>Not implemented.</strong> <code>@traced</code> logs only; no OTel backend, no dashboards.</td>
+</tr>
+<tr>
+<td><code>services/evaluation</code> — <code>Evaluator</code> ABC</td>
+<td>6</td>
+<td><strong>Not implemented.</strong> Raises.</td>
+</tr>
+<tr>
+<td><code>infrastructure/kubernetes</code>, <code>infrastructure/terraform</code></td>
+<td>7</td>
+<td><strong>Empty placeholders.</strong> Compose only today.</td>
+</tr>
+<tr>
+<td><code>services/security</code> — <code>AuthProvider</code>, <code>Guardrail</code></td>
+<td>8</td>
+<td><strong>Not implemented.</strong> API is entirely unauthenticated.</td>
+</tr>
+<tr>
+<td>Reliability — load testing, chaos, SLOs, pool tuning, reconnect/circuit breaking</td>
+<td>9</td>
+<td><strong>Nothing exists.</strong></td>
+</tr>
+</tbody>
+</table></div><h3>Deliberate non-goals for Stage 2</h3>
+<p>No LLM calls, no agents, no persistence, no vector search, no authentication, no
+OTel backend, no Kubernetes. Pagination conventions are deferred — no endpoint
+returns a collection yet.</p>
+<hr />
+<h2>Key architectural properties</h2>
+<p><strong>Stable seams.</strong> <code>@traced</code> is the tracing seam (Stage 5 makes it emit OTel spans
+without touching a single call site). <code>get_settings()</code> is the config seam.
+<code>CompletionEngine</code> is the model seam (Stage 3 swaps <code>EchoEngine</code> for an
+orchestrator without touching a route). <code>Datastore</code> is the storage seam (Stage 4
+swaps Qdrant's HTTP probe for <code>qdrant-client</code>). Later stages fill seams; they do
+not re-cut them.</p>
+<p><strong>Fail loud.</strong> Invalid config fails at startup — <code>prod</code> will not boot without its
+datastore URLs. Unbuilt components raise <code>NotImplementedError</code>. Errors are
+surfaced and logged with traces, never swallowed.</p>
+<p><strong>Honest health.</strong> <code>/ready</code> reflects reality: it dials its dependencies and says
+503 when they are down. <code>/health</code> answers only &quot;is this process alive?&quot;.</p>
+<p><strong>Reproducibility.</strong> Exact pins + committed <code>uv.lock</code> + <code>--frozen</code> installs mean
+laptop, CI and image resolve identically. <code>link-mode = &quot;copy&quot;</code> stops uv's
+cross-drive hardlink install from silently skipping a package.</p>
+<p><strong>Security posture from day one.</strong> No secrets in git (enforced by test +
+<code>.gitignore</code>), credentials from env only, container runs as non-root, internal
+error text never reaches clients.</p>
+<h2>See also</h2>
+<ul>
+<li><a href="adr/0001-stack-selection.md">ADR 0001 — Stack selection</a></li>
+<li><a href="adr/0002-repo-structure.md">ADR 0002 — Repository structure</a></li>
+<li><a href="adr/0003-configuration-approach.md">ADR 0003 — Configuration approach</a></li>
+<li><a href="adr/0004-streaming-transport.md">ADR 0004 — Streaming transport</a></li>
+<li><a href="adr/0005-datastore-connection-pooling.md">ADR 0005 — Datastore connection pooling and readiness</a></li>
+<li><a href="PROJECT_STATUS.md">PROJECT_STATUS.md</a> — roadmap and progress</li>
+</ul>
+
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs";
+const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+// useMaxWidth:false keeps diagrams at their natural size instead of shrinking
+// them to the container, which renders the labels unreadably small. Wide
+// diagrams scroll inside .mermaid (overflow-x:auto) rather than shrink.
+mermaid.initialize({
+  startOnLoad: true,
+  theme: dark ? "dark" : "default",
+  securityLevel: "strict",
+  flowchart: { useMaxWidth: false, htmlLabels: true, curve: "basis" },
+  sequence: { useMaxWidth: false },
+  state: { useMaxWidth: false },
+});
+</script>
+</body>
+</html>

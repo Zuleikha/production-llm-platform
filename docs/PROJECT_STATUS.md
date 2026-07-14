@@ -55,6 +55,21 @@ docs/verification-log/stage-09-reliability.md
 docs/verification-log/stage-10-portfolio.md
 ```
 
+## Architecture doc (visual, regenerated every stage)
+
+`docs/architecture.md` is the source of truth. **`architecture.html`** at the
+repo root is generated from it and renders the Mermaid diagrams — component map,
+liveness vs readiness, chat/SSE sequence, datastore lifecycle. Open it in a
+browser for the visual view.
+
+```
+uv run python scripts/build_architecture.py           # regenerate
+uv run python scripts/build_architecture.py --check   # CI/test: fail on drift
+```
+
+**Every stage updates `docs/architecture.md` and regenerates.** Never edit the
+HTML — `tests/unit/test_architecture.py` fails when the two disagree.
+
 ## Completed stages
 
 | Stage | Name | Summary | Verification | Completed |
