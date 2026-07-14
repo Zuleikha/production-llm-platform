@@ -7,8 +7,7 @@ alone.
 
 **Date:** 2026-07-14
 **Stage:** 2 — API
-**Commit verified:** working tree at stage-02-api completion, pre-commit
-(fill in final commit hash here once committed)
+**Commit verified:** 9e25850
 
 ## Result: PASS
 
@@ -102,14 +101,6 @@ ADR 0005.
 - `PytestCacheWarning: Access is denied` on `.pytest_cache` (Windows). Tests
   still pass; pytest just can't persist its cache. Worth investigating if it
   recurs or starts affecting anything beyond incremental test speed.
-
-## Open item carried to later stages
-
-`docs/PROJECT_STATUS.md`'s stage 2 milestone bullet listed "API versioning
-(/v1) and pagination conventions" as in scope. Versioning was implemented;
-pagination was deliberately skipped — there are no listable resources yet.
-Accepted as correct, but the milestone bullet should be corrected to reflect
-this rather than silently overclaiming once the stage closes out.
 
 ## Sign-off
 
