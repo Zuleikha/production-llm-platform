@@ -5,7 +5,19 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from services.api.middleware import REQUEST_ID_HEADER
+from services.api.routes.health import get_datastores
+from shared.datastores import Datastore, DatastoreRegistry
 from shared.version import get_version
+
+from tests.fakes import FakeDatastore
+
+
+def _with_datastores(client: TestClient, *stores: Datastore) -> None:
+    """Install a registry built from ``stores`` as the app's datastore layer."""
+    app = client.app
+    assert isinstance(app, FastAPI)
+    registry = DatastoreRegistry(list(stores))
+    app.dependency_overrides[get_datastores] = lambda: registry
 
 
 def test_health_returns_200_and_identity(client: TestClient) -> None:
@@ -18,13 +30,56 @@ def test_health_returns_200_and_identity(client: TestClient) -> None:
     assert body["environment"] == "test"
 
 
-def test_readiness_returns_200_with_empty_checks(client: TestClient) -> None:
+def test_health_never_probes_dependencies(client: TestClient) -> None:
+    """/health is pure liveness: it must not dial a datastore, ever.
+
+    The tripwire store fails on ping, so a /health that probes would 503.
+    """
+    tripwire = FakeDatastore("postgres", fails=True)
+    _with_datastores(client, tripwire)
+
+    resp = client.get("/health")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+    assert tripwire.ping_calls == 0
+
+
+def test_readiness_reports_not_configured_datastores_in_the_test_profile(
+    client: TestClient,
+) -> None:
+    """The test profile sets no datastore URLs, so nothing is dialled."""
     resp = client.get("/ready")
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ready"
-    # No downstream dependencies are wired in Stage 1.
-    assert body["checks"] == {}
+    assert body["checks"] == {
+        "postgres": "not_configured",
+        "redis": "not_configured",
+        "qdrant": "not_configured",
+    }
+
+
+def test_readiness_returns_200_when_every_datastore_answers(client: TestClient) -> None:
+    _with_datastores(client, FakeDatastore("postgres"), FakeDatastore("redis"))
+
+    resp = client.get("/ready")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ready"
+    assert body["checks"] == {"postgres": "ok", "redis": "ok"}
+
+
+def test_readiness_returns_503_when_a_datastore_is_unreachable(client: TestClient) -> None:
+    _with_datastores(client, FakeDatastore("postgres"), FakeDatastore("redis", fails=True))
+
+    resp = client.get("/ready")
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "not_ready"
+    assert body["checks"] == {"postgres": "ok", "redis": "unavailable"}
 
 
 def test_version_endpoint(client: TestClient) -> None:

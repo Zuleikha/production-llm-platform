@@ -6,13 +6,13 @@ Every stage prompt references this file. Update it at the end of each stage.
 | | |
 |---|---|
 | **Current version** | `0.1.0` |
-| **Current stage** | Stage 1 — Foundation (**complete**) |
-| **Overall progress** | **1 / 10 stages — 10%** |
-| **Next milestone** | Stage 2 — API |
+| **Current stage** | Stage 2 — API (**complete**) |
+| **Overall progress** | **2 / 10 stages — 20%** |
+| **Next milestone** | Stage 3 — Agents |
 | **Last updated** | 2026-07-14 |
 
 ```
-Progress  [█─────────]  1/10
+Progress  [██────────]  2/10
 ```
 
 ---
@@ -33,19 +33,39 @@ docs/stage-summaries/stage-07-kubernetes.md
 docs/stage-summaries/stage-08-security.md
 docs/stage-summaries/stage-09-reliability.md
 docs/stage-summaries/stage-10-portfolio.md
+
+```
+
+## Verification log naming convention (fixed — do not drift)
+
+Every stage's independent manual verification (separate from CC's self-report)
+is logged at exactly this path and filename. This list is canonical; naming
+must match the stage-summaries convention above exactly.
+
+```
+docs/verification-log/stage-01-foundation.md
+docs/verification-log/stage-02-api.md
+docs/verification-log/stage-03-agents.md
+docs/verification-log/stage-04-rag.md
+docs/verification-log/stage-05-observability.md
+docs/verification-log/stage-06-mlops.md
+docs/verification-log/stage-07-kubernetes.md
+docs/verification-log/stage-08-security.md
+docs/verification-log/stage-09-reliability.md
+docs/verification-log/stage-10-portfolio.md
 ```
 
 ## Completed stages
 
-| Stage | Name | Summary | Completed |
-|:-----:|------|---------|-----------|
-| 1 | Foundation | [stage-01-foundation.md](stage-summaries/stage-01-foundation.md) | 2026-07-14 |
+| Stage | Name | Summary | Verification | Completed |
+|:-----:|------|---------|--------------|-----------|
+| 1 | Foundation | [stage-01-foundation.md](stage-summaries/stage-01-foundation.md) | [stage-01-foundation.md](verification-log/stage-01-foundation.md) | 2026-07-14 |
+| 2 | API | [stage-02-api.md](stage-summaries/stage-02-api.md) | [stage-02-api.md](verification-log/stage-02-api.md) | 2026-07-14 |
 
 ## Remaining stages
 
 | Stage | Name | Summary file (fixed) | Objective |
 |:-----:|------|----------------------|-----------|
-| 2 | API | `stage-02-api.md` | Real API surface: chat/completion endpoints, streaming, request/response schemas, datastore wiring, readiness dependency probes |
 | 3 | Agents | `stage-03-agents.md` | Agent loop + tool use (LangChain/LangGraph); implement `Agent` and `Orchestrator` |
 | 4 | RAG | `stage-04-rag.md` | Retrieval: LlamaIndex ingestion/chunking, embeddings, Qdrant-backed `Retriever`/`VectorStore`, grounded answers with citations |
 | 5 | Observability | `stage-05-observability.md` | OpenTelemetry traces/metrics export, `@traced` → real spans, Grafana dashboards, alerting |
@@ -62,7 +82,18 @@ docs/stage-summaries/stage-10-portfolio.md
 ### ✅ Works today
 
 - **`api` service (FastAPI)** — `GET /health`, `/ready`, `/version`, `/metrics`,
-  plus generated OpenAPI docs at `/docs`.
+  `POST /v1/chat/completions`, plus generated OpenAPI docs at `/docs`.
+- **Chat completion endpoint** — OpenAI-shaped schemas and validation, backed by
+  a deterministic **echo engine** behind a `CompletionEngine` protocol. **No LLM
+  is called** — Stage 3 swaps the engine in without touching the routes.
+- **SSE streaming** — `"stream": true` returns `text/event-stream` with
+  `data: {json}` frames terminated by `data: [DONE]` (ADR 0004).
+- **Pooled datastore connections** — Postgres (asyncpg), Redis (redis.asyncio)
+  and Qdrant (pooled `httpx` → `/readyz`); opened concurrently in the lifespan,
+  closed on shutdown (ADR 0005).
+- **Real readiness probes** — `/ready` concurrently probes every configured store
+  and returns **503** `not_ready` when any is unavailable; `/health` stays pure
+  liveness and touches no datastore.
 - **Structured JSON logging** — one object per line with `timestamp`, `level`,
   `service`, `environment`, `request_id`, `logger`, `message`, and an
   `exception` trace on errors.
@@ -70,6 +101,8 @@ docs/stage-summaries/stage-10-portfolio.md
   bound to a `ContextVar`, echoed on the response, present on every access log.
 - **Typed layered configuration** — pydantic-settings with `dev`/`test`/`prod`
   profiles; OS env > `.env` > profile file > defaults; no secrets committed.
+  **`prod` refuses to boot** without all three datastore URLs (ADR 0005); the
+  `test` profile ignores the root `.env` so the suite stays hermetic.
 - **Prometheus metrics** — request counter + latency histogram, labelled by
   route template; scraped successfully by the Prometheus container.
 - **Global error handling** — uniform `{"error": {...}}` envelope; 500s never
@@ -77,34 +110,40 @@ docs/stage-summaries/stage-10-portfolio.md
 - **Lifespan hooks** — `service.startup` / `service.shutdown`.
 - **Docker Compose stack** — api (multi-stage, **non-root** uid 1001), postgres,
   redis, qdrant, prometheus, grafana (datasource provisioned as code).
-- **Quality gate** — ruff, ruff-format, mypy `strict`, pytest (21 tests),
-  pre-commit; GitHub Actions runs all of it plus a Docker build that fails
-  unless the container serves `GET /health` → 200.
+- **Quality gate** — ruff, ruff-format, mypy `strict`, pytest (56 tests),
+  pre-commit; GitHub Actions runs all of it plus a Docker build against live
+  postgres/redis/qdrant service containers, asserting `/ready` reports every
+  store `ok` and that chat + SSE work.
 
 ### ❌ Does not exist yet
 
-No LLM calls · no agents · no RAG/vector search · no database or cache
-connections · **no authentication** · no OpenTelemetry backend · no Grafana
-dashboards · no Kubernetes/Terraform · no evaluation · no load testing.
+No LLM calls · no agents · no RAG/vector search · **no authentication** · no
+OpenTelemetry backend · no Grafana dashboards · no Kubernetes/Terraform · no
+evaluation · no load testing.
 
-Postgres, Redis and Qdrant **run** in Compose but the application connects to
-none of them — the infrastructure is staged ahead of the code that will use it.
+Postgres, Redis and Qdrant are now **connected and probed**, but nothing is
+persisted: no schema, migrations, cache reads/writes, or vector operations.
+Qdrant is only reached for `GET /readyz`.
+
+API versioning (`/v1`) is in place, but **pagination conventions are deferred** —
+Stage 2 added no listable resources, so there is nothing to paginate. Revisit
+when an endpoint returns a collection.
 
 ---
 
-## Next milestone — Stage 2 (API)
+## Next milestone — Stage 3 (Agents)
 
-**Objective:** turn the foundation into a real API surface.
+**Objective:** replace the mock engine with a real agent loop.
 
 Expected scope:
 
-1. Chat/completion endpoints with Pydantic request/response schemas.
-2. Streaming responses (SSE).
-3. Wire PostgreSQL + Redis (connection pools, migrations, lifespan management).
-4. Extend `/ready` with genuine dependency probes (currently `checks: {}`).
-5. Move `redis`/`asyncpg` from the `datastores` extra into base dependencies.
-6. API versioning (`/v1`) and pagination conventions.
+1. Implement `Agent` and `Orchestrator` (currently stubs raising `NotImplementedError`).
+2. LangGraph-based orchestration; promote the `orchestration` extra to base deps.
+3. An orchestrator-backed `CompletionEngine` swapped in behind the existing
+   protocol — the routes and SSE plumbing should not change.
+4. Real model calls, real token accounting, tool use.
+5. Conversation state in Postgres / caching in Redis.
 
-**Prerequisites** (all met): foundation endpoints, config/logging/tracing seams,
-Compose datastores running, CI gate green. See
-[stage-01-foundation.md § Prerequisites for Stage 2](stage-summaries/stage-01-foundation.md#13-prerequisites-for-stage-2).
+**Prerequisites** (all met): the `CompletionEngine` seam + `get_engine`
+dependency, SSE plumbing proven against a mock, pooled datastores, CI gate green.
+See [stage-02-api.md § Prerequisites for Stage 3](stage-summaries/stage-02-api.md#9-prerequisites-for-stage-3).

@@ -73,6 +73,18 @@ dev = [
 # package. Packages are imported via the repo-root path (see pytest config).
 package = false
 
+# Copy files into the venv instead of hardlinking them from uv's cache.
+# uv's default hardlink mode fails when the cache and the venv are on different
+# drives — and it fails SILENTLY, leaving a package in uv.lock but absent from
+# the venv, which surfaces later as a baffling ModuleNotFoundError or an
+# import-time crash. This repo lives on D: while the cache defaults to C:, and
+# that has already bitten twice here.
+#
+# Declared here rather than relying on the UV_LINK_MODE env var so it also
+# protects anyone who clones the repo onto a drive other than their uv cache.
+# The env var still takes precedence for anyone who needs to override it.
+link-mode = "copy"
+
 # ---------------------------------------------------------------------------
 # Ruff — linter + formatter (replaces black + isort + flake8). See ADR 0001.
 # ---------------------------------------------------------------------------
@@ -118,7 +130,8 @@ files = ["services", "shared", "tests"]
 
 [[tool.mypy.overrides]]
 # Third-party libs without bundled type hints — do not fail strict mode on them.
-module = ["prometheus_client.*"]
+# asyncpg ships no py.typed marker (as of 0.31.0); redis and httpx do.
+module = ["prometheus_client.*", "asyncpg.*"]
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------

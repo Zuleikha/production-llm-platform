@@ -5,25 +5,33 @@ lives in `docs/adr/`.
 
 ## Current state
 
-**Stage 1 of 10 (foundation) — COMPLETE.** Version `0.1.0`.
+**Stage 2 of 10 (API) — COMPLETE.** Version `0.1.0`.
 
-A FastAPI `api` service that starts, reports health/readiness/version, exposes
-Prometheus metrics, logs structured JSON with request-id correlation, and runs in
-a 6-container Compose stack. **No LLM call, agent, RAG, DB connection or auth
-exists yet** — those are later stages, and their folders are stubs that raise
-`NotImplementedError`.
+Stage 1's service plus: `POST /v1/chat/completions` with SSE streaming, pooled
+Postgres/Redis/Qdrant connections opened in the lifespan, and a `/ready` that
+does real dependency probes (503 when any is unavailable). **No LLM call is
+made** — the endpoint is backed by a deterministic `EchoEngine` behind a
+`CompletionEngine` protocol that Stage 3 swaps out. **No agent, RAG or auth
+exists yet**; those folders are stubs that raise `NotImplementedError`.
+
+Datastores are connected and probed but **nothing is persisted** — no schema,
+migrations, cache use, or vector ops.
 
 Roadmap + progress: **`docs/PROJECT_STATUS.md`** (canonical).
-Stage 1 detail: `docs/stage-summaries/stage-01-foundation.md`.
-Why anything is the way it is: **`docs/adr/`** (0001 stack, 0002 structure, 0003 config).
+Stage detail: `docs/stage-summaries/stage-0{1-foundation,2-api}.md`.
+Why anything is the way it is: **`docs/adr/`** (0001 stack, 0002 structure,
+0003 config, 0004 streaming transport, 0005 datastore pooling).
 
 ## Layout
 
 ```
 services/api/      ✅ the only implemented service
+                   app.py · routes/{health,meta,chat}.py · schemas.py ·
+                   completions.py (CompletionEngine seam) · errors.py · middleware.py
 services/{agents,orchestrator,retrieval,evaluation,monitoring,security}/  ⬜ stubs
-shared/            config.py · logging.py · observability.py · version.py
+shared/            config.py · logging.py · observability.py · version.py · datastores.py
 config/environments/{dev,test,prod}.env    committed, NON-SECRET defaults
+tests/             a package (__init__.py); fakes.py holds shared test doubles
 tests/unit/        mirrors source layout
 docs/              architecture · adr · runbooks · stage-summaries · prompts
 infrastructure/    docker ✅ · kubernetes ⬜ · terraform ⬜
@@ -41,7 +49,17 @@ infrastructure/    docker ✅ · kubernetes ⬜ · terraform ⬜
   `get_settings()` (`lru_cache`d), injected with `Depends(get_settings)`.
   Precedence: OS env > `.env` > `config/environments/<ENVIRONMENT>.env` >
   defaults. `ENVIRONMENT` = `dev`|`test`|`prod`. **No secrets in committed files**
-  — credentials come from OS env only (a test enforces this).
+  — credentials come from OS env only (a test enforces this). **`prod` requires
+  all three datastore URLs** and refuses to construct without them; the `test`
+  profile ignores the root `.env` to stay hermetic.
+- **Datastores:** `DatastoreRegistry.from_settings()` on `app.state.datastores`,
+  read via the `get_datastores` dependency. A store with no URL is
+  `not_configured` and never dialled. `startup()` is concurrent and **never
+  raises** — failures surface on `/ready`, not as a crash loop. `/health` must
+  **never** probe a dependency (a tripwire test enforces this).
+- **Chat:** routes call the `CompletionEngine` protocol on `app.state.engine`
+  (`get_engine` dependency), never `services.orchestrator` directly. Stage 2's
+  `EchoEngine` is a mock; Stage 3 substitutes behind the same protocol.
 - **Logging:** `get_logger(__name__)`; log **events** not sentences —
   `_logger.info("http.request", extra={...})`. One JSON object per line with
   `timestamp, level, service, environment, request_id, logger, message` (+
@@ -74,17 +92,23 @@ uv run mypy               # strict
 uv run pytest -v
 ```
 
-Endpoints: `/health` `/ready` `/version` `/metrics` `/docs`.
-Prometheus :9090 · Grafana :3000.
+Endpoints: `/health` `/ready` `/version` `/metrics` `/docs`
+`POST /v1/chat/completions` (`"stream": true` for SSE).
+Prometheus :9090 · Grafana :3001 (see quirks).
 
 ## Known environment quirks
 
 This machine, not the code. Check here before assuming a bug.
 
-- **Cross-drive uv.** The uv cache is on `C:`, the repo on `D:`. Cross-drive
-  hardlinking is unreliable, so **`UV_LINK_MODE=copy` is required** — already set
-  permanently as a User env var, and exported by both `scripts/verify.*`. A shell
-  opened before it was set won't have it.
+- **Cross-drive uv / lock-install mismatch.** The uv cache is on `C:`, the repo
+  on `D:`. uv's default hardlink mode fails across drives, and fails **silently**
+  — the package stays in `uv.lock` but never lands in the venv, surfacing later
+  as a baffling `ModuleNotFoundError`. Fixed repo-wide by `link-mode = "copy"`
+  under `[tool.uv]`, so a fresh clone is safe on any drive; `UV_LINK_MODE=copy`
+  (User env var + `scripts/verify.*`) is now redundant belt-and-braces. If a
+  locked package still won't import, diff `uv pip list` against `uv.lock` before
+  assuming a code bug. `sniffio` stays pinned as an explicit direct dep (normally
+  transitive via `anyio`) from when this bit before the cause was understood.
 - **Do not use the system Python at `D:\Python\Python312`.** It is a
   stripped/embeddable build: no `venv` module, DLLs in the install root, and a
   venv made from it resolves `sys.base_prefix` wrongly and **segfaults on
@@ -92,11 +116,6 @@ This machine, not the code. Check here before assuming a bug.
   `httpx`→`click`→`ctypes`). Use a uv-managed interpreter:
   `uv python install 3.12 && uv venv --managed-python --python 3.12`.
   The venv currently runs managed CPython **3.12.13**.
-- **Lock/install mismatch.** If a package is in `uv.lock` but you get
-  `ModuleNotFoundError` or a silent crash on import, diff `uv pip list` against
-  `uv.lock` *before* assuming a code bug — installs can partially fail silently.
-  Workaround used here: pin the package as an explicit direct dependency in
-  `pyproject.toml` (done for `sniffio`, normally transitive via `anyio`).
 - **Grafana port 3000 conflicts with `open-webui`.** An unrelated container on
   this machine binds host port 3000 first, so Grafana fails to start with
   "port is already allocated". Host port remapped to **3001** in
@@ -107,21 +126,24 @@ This machine, not the code. Check here before assuming a bug.
 
 | Stage | Deferred |
 |:--:|---|
-| 2 | Chat/completion endpoints, streaming, DB/Redis wiring, `/ready` dependency probes |
-| 3 | Agents (`Agent`), orchestration (`Orchestrator`, LangGraph) |
-| 4 | RAG — `Retriever`/`VectorStore`, LlamaIndex ingest, Qdrant queries |
+| 3 | Real model calls, agents (`Agent`), orchestration (`Orchestrator`, LangGraph), DB schema/migrations, Redis caching |
+| 4 | RAG — `Retriever`/`VectorStore`, LlamaIndex ingest, Qdrant queries (`qdrant-client`) |
 | 5 | OpenTelemetry export, Grafana dashboards, alerting (`@traced` logs only today) |
 | 6 | Evaluation (`Evaluator`), MLOps pipelines |
 | 7 | Kubernetes manifests, Terraform |
 | 8 | Auth (`AuthProvider`), guardrails, rate limiting — **API is unauthenticated** |
-| 9 | Load/chaos testing, SLOs |
+| 9 | Load/chaos testing, SLOs, pool tuning, reconnect/circuit breaking |
 | 10 | Portfolio polish |
 
-Postgres/Redis/Qdrant **run in Compose but the app connects to none of them**.
-`Settings.database_url|redis_url|qdrant_url` exist but are unused in Stage 1.
+Postgres/Redis/Qdrant are **connected and probed, but nothing is persisted** — no
+schema, migrations, cache reads/writes or vector ops. Qdrant is only `GET /readyz`.
 
 ## Known issues
 
 - Starlette 1.3.1 deprecates `httpx` for `TestClient` in favour of `httpx2` —
   emits a warning; harmless. Migrate when TestClient requires it.
 - `config/environments/*.env` can drift from `.env.example`; nothing enforces it.
+- A datastore whose `connect` fails at boot stays `unavailable` until restart (no
+  reconnect). One that connects and *later* blips does recover — the driver pools
+  reconnect on the next ping.
+- The 422 envelope stringifies Pydantic's raw error list into `message`.

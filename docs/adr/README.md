@@ -16,6 +16,8 @@ Every ADR uses: **Context** (the forces at play) → **Decision** (what we chose
 | [0001](0001-stack-selection.md) | Stack selection | Accepted | 1 |
 | [0002](0002-repo-structure.md) | Repository structure | Accepted | 1 |
 | [0003](0003-configuration-approach.md) | Configuration approach | Accepted | 1 |
+| [0004](0004-streaming-transport.md) | Streaming transport for chat completions | Accepted | 2 |
+| [0005](0005-datastore-connection-pooling.md) | Datastore connection pooling and readiness | Accepted | 2 |
 
 ## Conventions
 

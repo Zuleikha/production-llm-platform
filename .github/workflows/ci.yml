@@ -56,6 +56,34 @@ jobs:
   docker:
     name: Docker build + health verification
     runs-on: ubuntu-latest
+
+    # Real datastores for the container to connect to. The image defaults to
+    # ENVIRONMENT=prod, which (from Stage 2) refuses to boot without all three
+    # URLs — so /ready in this job does genuine probes, not a stub. See ADR 0005.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: platform
+          POSTGRES_PASSWORD: platform
+          POSTGRES_DB: platform
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U platform -d platform"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      qdrant:
+        image: qdrant/qdrant:v1.12.4
+        ports:
+          - 6333:6333
+
     steps:
       - uses: actions/checkout@v4
 
@@ -72,10 +100,27 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Qdrant has no health option above (no shell in its image), so wait for
+      # its HTTP API before starting the API — otherwise /ready races it.
+      - name: Wait for qdrant
+        run: |
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:6333/readyz >/dev/null 2>&1 && echo "qdrant ready after ${i}s" && exit 0
+            sleep 1
+          done
+          echo "::error::qdrant did not become ready within 30s"
+          exit 1
+
+      # --network host so the container reaches the service containers, which
+      # are published on the runner's localhost. Credentials here are ephemeral
+      # CI-only values, never production secrets.
       - name: Run container
         run: |
-          docker run -d --name api-ci -p 8000:8000 \
+          docker run -d --name api-ci --network host \
             -e ENVIRONMENT=prod \
+            -e DATABASE_URL=postgresql://platform:platform@localhost:5432/platform \
+            -e REDIS_URL=redis://localhost:6379/0 \
+            -e QDRANT_URL=http://localhost:6333 \
             production-llm-platform/api:ci
 
       - name: Wait for /health to return 200
@@ -93,12 +138,35 @@ jobs:
           docker logs api-ci
           exit 1
 
-      - name: Verify /ready, /version and /metrics
+      # /ready must report each datastore as genuinely reachable — a 200 alone
+      # would also pass if the probes were stubbed out.
+      - name: Verify /ready probes every datastore
         run: |
           set -euo pipefail
-          curl -fsS http://localhost:8000/ready | tee /dev/stderr | grep -q '"status":"ready"'
+          body=$(curl -fsS http://localhost:8000/ready | tee /dev/stderr)
+          echo "$body" | grep -q '"status":"ready"'
+          echo "$body" | grep -q '"postgres":"ok"'
+          echo "$body" | grep -q '"redis":"ok"'
+          echo "$body" | grep -q '"qdrant":"ok"'
+
+      - name: Verify /version and /metrics
+        run: |
+          set -euo pipefail
           curl -fsS http://localhost:8000/version | tee /dev/stderr | grep -q '"service":"api"'
           curl -fsS http://localhost:8000/metrics | grep -q 'http_requests_total'
+
+      - name: Verify chat completion and SSE streaming
+        run: |
+          set -euo pipefail
+          curl -fsS http://localhost:8000/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -d '{"messages":[{"role":"user","content":"ping"}]}' \
+            | tee /dev/stderr | grep -q '"object":"chat.completion"'
+          stream=$(curl -fsS -N http://localhost:8000/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -d '{"messages":[{"role":"user","content":"ping"}],"stream":true}' | tee /dev/stderr)
+          echo "$stream" | grep -q '"object":"chat.completion.chunk"'
+          echo "$stream" | grep -q 'data: \[DONE\]'
 
       - name: Container logs (always)
         if: always()

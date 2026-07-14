@@ -4,10 +4,8 @@
 #   docker compose up -d --build
 #   curl http://localhost:8000/health
 #
-# NOTE (Stage 1): the api does NOT yet connect to postgres/redis/qdrant. They are
-# wired here so the infrastructure is ready and reproducible; the API consumes
-# them from Stage 2 onward. Connection URLs are passed as env vars already to
-# establish the pattern.
+# The api connects to postgres/redis/qdrant on startup (Stage 2) and probes all
+# three from /ready. Connection URLs are injected as env vars below.
 #
 # Credentials below are LOCAL DEV PLACEHOLDERS ONLY, overridable via .env.
 # Production secrets are injected by the deployment platform, never committed.
@@ -31,7 +29,7 @@ services:
       LOG_FORMAT: json
       LOG_LEVEL: INFO
       API_PORT: "8000"
-      # Reserved for Stage 2+ (unused by the Stage 1 app).
+      # Pooled at startup and probed by /ready — see ADR 0005.
       DATABASE_URL: postgresql://${POSTGRES_USER:-platform}:${POSTGRES_PASSWORD:-platform}@postgres:5432/${POSTGRES_DB:-platform}
       REDIS_URL: redis://redis:6379/0
       QDRANT_URL: http://qdrant:6333
