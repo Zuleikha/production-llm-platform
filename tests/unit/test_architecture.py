@@ -42,6 +42,33 @@ def test_generated_html_is_marked_as_generated() -> None:
     assert "docs/architecture.md" in html
 
 
+def test_a_mermaid_load_failure_is_reported_not_silent() -> None:
+    """Offline, diagrams degrade to source text — the page must say why.
+
+    A static import cannot be caught, so a dynamic import inside try/catch is the
+    thing that makes the failure visible. Pin that, not just the notice's text.
+    """
+    html = _HTML.read_text(encoding="utf-8")
+    assert 'id="diagram-notice"' in html
+    assert "internet access" in html
+    assert "await import(" in html, "a static import cannot report its own failure"
+    assert "catch (error)" in html
+    assert 'getElementById("diagram-notice").hidden = false' in html
+
+
+def test_the_failure_notice_is_hidden_when_diagrams_render() -> None:
+    """It must not cry wolf on the happy path."""
+    html = _HTML.read_text(encoding="utf-8")
+    assert '<div id="diagram-notice" class="diagram-notice" hidden>' in html
+
+
+def test_diagrams_are_explained_when_javascript_is_disabled() -> None:
+    """<noscript> covers JS-off; it does NOT fire when JS runs but the CDN is down."""
+    html = _HTML.read_text(encoding="utf-8")
+    assert "<noscript>" in html
+    assert "JavaScript is\n  disabled" in html or "JavaScript is disabled" in html
+
+
 def test_mermaid_diagrams_are_rendered_not_shown_as_code() -> None:
     """The whole point of the HTML view is drawn diagrams.
 

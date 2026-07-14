@@ -71,6 +71,17 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }
   border: 1px dashed var(--border); border-radius: 6px; padding: .5rem .75rem;
 }
 .build-stamp code { font-size: .8125em; }
+/* Shown only when Mermaid does not load. Diagrams degrade to their source text,
+   which is quietly useless unless we say why — this doc argues for failing loud,
+   so it had better do it itself. */
+.diagram-notice {
+  margin: 0 auto 1.5rem; max-width: 980px; padding: .625rem .875rem;
+  border: 1px solid #e8a33d; border-left: 4px solid #e8a33d; border-radius: 6px;
+  background: #fff4e6; color: #7a4a00; font-size: .875rem;
+}
+@media (prefers-color-scheme: dark) {
+  .diagram-notice { background: #2b210f; color: #f0c274; }
+}
 </style>
 </head>
 <body>
@@ -78,6 +89,14 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }
   <strong>Generated file — do not edit.</strong>
   Rendered from <code>docs/architecture.md</code> by
   <code>scripts/build_architecture.py</code>. Built 2026-07-14.
+</div>
+<noscript>
+  <p class="diagram-notice"><strong>Diagrams not rendered:</strong> JavaScript is
+  disabled. Each diagram below is shown as its Mermaid source instead.</p>
+</noscript>
+<div id="diagram-notice" class="diagram-notice" hidden>
+  <strong>Diagrams not rendered:</strong> this page needs internet access to load
+  Mermaid.js from a CDN. Each diagram below is shown as its Mermaid source instead.
 </div>
 <main>
 <h1>Architecture</h1>
@@ -393,19 +412,31 @@ error text never reaches clients.</p>
 
 </main>
 <script type="module">
-import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs";
+// A static `import` cannot be caught: if the CDN is unreachable the whole module
+// fails and the page silently shows diagram source with no explanation. A dynamic
+// import in a try/catch lets the failure be reported instead of swallowed — the
+// same fail-loud rule the architecture it documents is built on.
 const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-// useMaxWidth:false keeps diagrams at their natural size instead of shrinking
-// them to the container, which renders the labels unreadably small. Wide
-// diagrams scroll inside .mermaid (overflow-x:auto) rather than shrink.
-mermaid.initialize({
-  startOnLoad: true,
-  theme: dark ? "dark" : "default",
-  securityLevel: "strict",
-  flowchart: { useMaxWidth: false, htmlLabels: true, curve: "basis" },
-  sequence: { useMaxWidth: false },
-  state: { useMaxWidth: false },
-});
+try {
+  const { default: mermaid } = await import("https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs");
+  // useMaxWidth:false keeps diagrams at their natural size instead of shrinking
+  // them to the container, which renders the labels unreadably small. Wide
+  // diagrams scroll inside .mermaid (overflow-x:auto) rather than shrink.
+  // startOnLoad:false + explicit run(): DOMContentLoaded may already have fired
+  // by the time this dynamic import resolves, so auto-start is not reliable.
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: dark ? "dark" : "default",
+    securityLevel: "strict",
+    flowchart: { useMaxWidth: false, htmlLabels: true, curve: "basis" },
+    sequence: { useMaxWidth: false },
+    state: { useMaxWidth: false },
+  });
+  await mermaid.run({ querySelector: ".mermaid" });
+} catch (error) {
+  document.getElementById("diagram-notice").hidden = false;
+  console.error("Mermaid failed to load or render; diagrams shown as source.", error);
+}
 </script>
 </body>
 </html>
