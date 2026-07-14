@@ -8,9 +8,9 @@ license = { text = "MIT" }
 authors = [{ name = "production-llm-platform maintainers" }]
 
 # Base runtime dependencies. These are the ONLY packages required to run the
-# Stage 1 foundation API. Heavy future-stage libraries (LangChain, LangGraph,
-# LlamaIndex, OpenTelemetry SDK, DB drivers) are declared as optional extras
-# below so the base install stays small and `uv sync` stays fast and reliable.
+# API through Stage 2. Heavy future-stage libraries (LangChain, LangGraph,
+# LlamaIndex, OpenTelemetry SDK) remain optional extras below so the base
+# install stays small and `uv sync` stays fast and reliable.
 # All versions are pinned exactly (== ) — see ADR 0001 for rationale.
 dependencies = [
     "fastapi==0.139.0",
@@ -18,6 +18,14 @@ dependencies = [
     "pydantic==2.13.4",
     "pydantic-settings==2.14.2",
     "prometheus-client==0.25.0",
+    # Datastore drivers — promoted out of the `datastores` extra in Stage 2,
+    # when the API actually started connecting to Postgres and Redis (ADR 0005).
+    "asyncpg==0.31.0",
+    "redis==8.0.1",
+    # Qdrant is reached over its HTTP API via a pooled AsyncClient rather than
+    # `qdrant-client`, which is a Stage 4 (retrieval) dependency — ADR 0005.
+    # httpx is therefore a runtime dep from Stage 2, not just a test-only one.
+    "httpx==0.28.1",
     # Normally transitive (via anyio -> httpx). Pinned as an explicit direct
     # dependency to work around a cross-drive uv install quirk on this machine
     # where it was silently not installed, causing an import-time crash. See
@@ -43,18 +51,17 @@ observability = [
     "opentelemetry-sdk==1.43.0",
     "opentelemetry-instrumentation-fastapi==0.64b0",
 ]
-# Datastore drivers (used from Stage 2 onward once the API talks to storage).
-datastores = [
-    "redis==8.0.1",
-    "asyncpg==0.31.0",
-]
+# NOTE: the `datastores` extra (redis, asyncpg) was removed in Stage 2 — those
+# drivers are now base dependencies, since the API connects to Postgres and
+# Redis on every startup and they are no longer optional.
 
 [dependency-groups]
 # Developer tooling — installed by `uv sync` by default, excluded from images.
 dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
-    "httpx==0.28.1",
+    # NOTE: httpx moved to base dependencies in Stage 2 (pooled Qdrant client);
+    # TestClient still relies on it, but it is no longer dev-only.
     "ruff==0.15.21",
     "mypy==2.3.0",
     "pre-commit==4.6.0",
