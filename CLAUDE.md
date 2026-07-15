@@ -30,8 +30,7 @@ services/orchestrator/  base.py (Orchestrator · AgentOrchestrator) · graph.py
                  (LangGraph) · llm.py (LLMClient seam) · conversations.py
 services/{retrieval,evaluation,monitoring,security}/  ⬜ stubs
 shared/          config · logging · observability · datastores · migrations · version
-migrations/      NNNN_name.sql — forward-only, applied in the lifespan
-tests/           fakes.py = shared doubles; unit/ mirrors source
+migrations/      NNNN_name.sql — forward-only, applied in the lifespan · tests/ mirrors source
 docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.md
 ```
 
@@ -74,15 +73,19 @@ docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.
   PII/secrets/tokens. **Tracing:** `@traced` on new application functions; **exempt:**
   `shared/{logging,observability}.py` (recursion), async generators/lifespan, and
   LangGraph nodes (the graph inspects signatures).
-- **Errors:** fail loud. Envelope `{"error": {type, message, request_id}}`; 500s
-  never leak internals. Handlers on **Starlette's** `HTTPException`.
+- **Errors:** fail loud. Envelope `{"error": {type, message, request_id}}`; 500s never
+  leak internals. Handlers on **Starlette's** `HTTPException`.
 - **Types:** mypy `strict`, everything annotated incl. tests. Narrow with `isinstance`
-  rather than `# type: ignore`. Depend on narrow Protocols (`CacheBackend`,
-  `LLMClient`) not concrete driver types. **Deps:** exact `==` pins, `uv.lock`
-  committed, `--frozen` installs.
+  not `# type: ignore`. Depend on narrow Protocols (`CacheBackend`, `LLMClient`) not
+  concrete driver types. **Deps:** `==` pins, `uv.lock` committed, `--frozen` installs.
 - **Tests:** `tests/unit/`, mirror source. Test contracts, not internals. Write the
   failing test first; never edit a test to make it pass. Switching profiles needs
   `monkeypatch.setenv` **+** `get_settings.cache_clear()`.
+- **Container boot is required, not deferrable.** Before self-report, `docker build`
+  and run the image in **both** `prod` and `test` profiles, and curl the endpoints
+  the stage touched. A green `pytest` does not prove the container boots: Stage 3
+  deferred this as a "known gap" and CI then caught two real failures a 2-minute
+  local boot catches instantly (`docs/verification-log/stage-03-agents.md`).
 - **Architecture doc:** `docs/architecture.md` is the source; `architecture.html` is
   **generated** by `scripts/build_architecture.py` — never edit the HTML. Diagrams
   are **pre-rendered SVG** in `docs/diagrams/` — no CDN, no JS (ADR 0010). Changing
@@ -100,26 +103,24 @@ docker compose up -d --build                   # full stack
 pwsh scripts/verify.ps1   # or ./scripts/verify.sh — the whole gate
 uv run ruff check . --fix ; uv run ruff format . ; uv run mypy ; uv run pytest -v
 uv run python scripts/build_architecture.py   # regenerate (needs npx for diagrams)
-# Opt-in live-datastore tests (docker compose up -d postgres redis): set
-# TEST_DATABASE_URL + TEST_REDIS_URL — see docs/stage-summaries/stage-03-agents.md
+docker build -t plp/api:local . && docker run -d -p 8010:8000 -e ENVIRONMENT=test plp/api:local
 ```
 
-Endpoints: `/health` `/ready` `/version` `/metrics` `/docs` ·
-`POST /v1/chat/completions` (`"stream": true` for SSE; optional `conversation_id`).
-Prometheus :9090 · Grafana :3001 (see quirks).
+Endpoints: `/health` `/ready` `/version` `/metrics` `/docs` · `POST /v1/chat/completions`
+(`"stream": true` for SSE; optional `conversation_id`). Prometheus :9090 · Grafana :3001.
 
 ## Known environment quirks — this machine, not the code
 
-- **Cross-drive uv / lock-install mismatch.** uv cache on `C:`, repo on `D:`.
-  uv's default hardlink mode fails across drives **silently** — the package stays
-  in `uv.lock` but never lands in the venv, surfacing as a baffling
+- **Cross-drive uv / lock-install mismatch.** uv cache on `C:`, repo on `D:`. uv's
+  default hardlink mode fails across drives **silently** — the package stays in
+  `uv.lock` but never lands in the venv, surfacing as a baffling
   `ModuleNotFoundError`. Fixed repo-wide by `link-mode = "copy"` under `[tool.uv]`
   — do not remove. If a locked package won't import, diff `uv pip list` against
-  `uv.lock` first. `sniffio` stays an explicit direct dep from when this bit.
-- **Do not use the system Python at `D:\Python\Python312`.** Stripped build: a venv
+  `uv.lock` first. `sniffio` is an explicit direct dep from when this bit.
+- **Never use the system Python at `D:\Python\Python312`.** Stripped build: a venv
   from it **segfaults on `import ctypes`** (surfaces as an access violation importing
-  `httpx`). Use `uv python install 3.12 && uv venv --managed-python --python 3.12`.
-  The venv runs managed CPython **3.12.13**.
+  `httpx`). Use `uv python install 3.12 && uv venv --managed-python --python 3.12`;
+  the venv runs managed CPython **3.12.13**.
 - **Grafana port 3000 conflicts with `open-webui`.** Remapped to **3001** in
   `docker-compose.yml`; check `docker ps` for collisions first. **Docker Desktop
   must be running** for live-datastore tests — `docker compose version` works
@@ -135,15 +136,14 @@ Prometheus :9090 · Grafana :3001 (see quirks).
 
 ## Known issues
 
-- Starlette 1.3.1 deprecates `httpx` for `TestClient` (warning only). 422
-  stringifies Pydantic's raw error list into `message`. `config/environments/*.env`
-  can drift from `.env.example`; nothing enforces it. A datastore whose `connect`
-  fails at boot stays `unavailable` until restart; a *later* blip recovers.
+- Starlette 1.3.1 deprecates `httpx` for `TestClient` (warning only). 422 stringifies
+  Pydantic's raw error list into `message`. `config/environments/*.env` can drift from
+  `.env.example`. A datastore failing `connect` at boot stays `unavailable` until restart.
 - **`/ready` does not check schema version** — a failed migration leaves the
   service reporting ready while every chat query fails (ADR 0007).
 - **No per-conversation concurrency control** — two concurrent turns on one
   `conversation_id` collide on `(conversation_id, position)`; the second fails
-  loudly rather than serialising (ADR 0008).
+  loudly, not serialised (ADR 0008).
 - **The hermetic suite cannot catch a wrong assumption about the real Anthropic
   API** — the fake encodes our beliefs. Make a real call when changing `llm.py`
   (ADR 0009).

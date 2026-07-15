@@ -189,3 +189,13 @@ pooled and probed, and conversation persistence.
 which is what makes tool results safe to feed back into the model unexamined.
 A retrieval tool returns *document text* — potentially attacker-controlled — so
 prompt injection through tool results becomes a real concern the moment it lands.
+
+**Carried forward from Stage 3 — unresolved, flag when drafting the Stage 4
+prompt:** no contract test exists against the real Anthropic API. CI proves the
+HTTP surface only and never makes a live model call, so a provider-side field
+rename (usage keys, event names, response shape) would pass CI undetected. The
+only thing that ever exercised the real API was two manually-approved live
+calls in Stage 3 (~$0.021), a one-off, not a repeatable check. Decide during
+Stage 4 scoping whether this belongs there or is explicitly deferred to
+Stage 6 (MLOps/evaluation) — do not let it silently fall through the gap
+between the two.
