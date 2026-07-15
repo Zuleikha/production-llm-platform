@@ -6,13 +6,13 @@ Every stage prompt references this file. Update it at the end of each stage.
 | | |
 |---|---|
 | **Current version** | `0.1.0` |
-| **Current stage** | Stage 2 — API (**complete**) |
-| **Overall progress** | **2 / 10 stages — 20%** |
-| **Next milestone** | Stage 3 — Agents |
-| **Last updated** | 2026-07-14 |
+| **Current stage** | Stage 3 — Agents (**complete**) |
+| **Overall progress** | **3 / 10 stages — 30%** |
+| **Next milestone** | Stage 4 — RAG |
+| **Last updated** | 2026-07-15 |
 
 ```
-Progress  [██────────]  2/10
+Progress  [███───────]  3/10
 ```
 
 ---
@@ -58,9 +58,14 @@ docs/verification-log/stage-10-portfolio.md
 ## Architecture doc (visual, regenerated every stage)
 
 `docs/architecture.md` is the source of truth. **`architecture.html`** at the
-repo root is generated from it and renders the Mermaid diagrams — component map,
-liveness vs readiness, chat/SSE sequence, datastore lifecycle. Open it in a
-browser for the visual view.
+repo root is generated from it — component map, liveness vs readiness, the agent
+loop, the chat/SSE sequence, conversation caching, datastore lifecycle. Open it
+in a browser for the visual view.
+
+Diagrams are **pre-rendered to inline SVG** under `docs/diagrams/` (ADR 0010):
+the page loads no CDN, runs no JavaScript, and renders offline. Regenerating a
+diagram needs Node + `npx`; **building the page and running `--check` need only
+Python**, so CI and the test suite carry no JS toolchain.
 
 ```
 uv run python scripts/build_architecture.py           # regenerate
@@ -76,12 +81,12 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
 |:-----:|------|---------|--------------|-----------|
 | 1 | Foundation | [stage-01-foundation.md](stage-summaries/stage-01-foundation.md) | [stage-01-foundation.md](verification-log/stage-01-foundation.md) | 2026-07-14 |
 | 2 | API | [stage-02-api.md](stage-summaries/stage-02-api.md) | [stage-02-api.md](verification-log/stage-02-api.md) | 2026-07-14 |
+| 3 | Agents | [stage-03-agents.md](stage-summaries/stage-03-agents.md) | [stage-03-agents.md](verification-log/stage-03-agents.md) | 2026-07-15 |
 
 ## Remaining stages
 
 | Stage | Name | Summary file (fixed) | Objective |
 |:-----:|------|----------------------|-----------|
-| 3 | Agents | `stage-03-agents.md` | Agent loop + tool use (LangChain/LangGraph); implement `Agent` and `Orchestrator` |
 | 4 | RAG | `stage-04-rag.md` | Retrieval: LlamaIndex ingestion/chunking, embeddings, Qdrant-backed `Retriever`/`VectorStore`, grounded answers with citations |
 | 5 | Observability | `stage-05-observability.md` | OpenTelemetry traces/metrics export, `@traced` → real spans, Grafana dashboards, alerting |
 | 6 | MLOps | `stage-06-mlops.md` | Evaluation (`Evaluator`), eval datasets, LLM-as-judge, regression gates in CI, pipelines |
@@ -99,8 +104,21 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
 - **`api` service (FastAPI)** — `GET /health`, `/ready`, `/version`, `/metrics`,
   `POST /v1/chat/completions`, plus generated OpenAPI docs at `/docs`.
 - **Chat completion endpoint** — OpenAI-shaped schemas and validation, backed by
-  a deterministic **echo engine** behind a `CompletionEngine` protocol. **No LLM
-  is called** — Stage 3 swaps the engine in without touching the routes.
+  a **real LangGraph agent loop calling the Anthropic API** (`claude-opus-4-8`)
+  behind the `CompletionEngine` protocol. Stage 2's echo engine is gone; the
+  routes and wire format did not change, which is what the seam was for.
+- **Agent loop with tool use** — `reason → select tool → execute → observe →
+  answer`, as an explicit LangGraph state machine, bounded by a step cap. Three
+  deterministic offline tools: `calculator`, `text_stats`, `json_query`.
+- **Real token accounting** — the model's own `input_tokens` / `output_tokens`,
+  summed across every model call a run makes (ADR 0006).
+- **Conversation state** — Postgres schema + a forward-only SQL migration runner
+  applied on boot (ADR 0007), behind a Redis read-through cache where Postgres
+  stays the source of truth (ADR 0008). Opt-in per request via `conversation_id`;
+  without one the endpoint is stateless exactly as in Stage 2.
+- **Hermetic by construction** — the `test` profile *cannot* construct a real
+  Anthropic client, so no test can spend money regardless of what is in the
+  environment. CI needs no `ANTHROPIC_API_KEY` (ADR 0009).
 - **SSE streaming** — `"stream": true` returns `text/event-stream` with
   `data: {json}` frames terminated by `data: [DONE]` (ADR 0004).
 - **Pooled datastore connections** — Postgres (asyncpg), Redis (redis.asyncio)
@@ -116,8 +134,9 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
   bound to a `ContextVar`, echoed on the response, present on every access log.
 - **Typed layered configuration** — pydantic-settings with `dev`/`test`/`prod`
   profiles; OS env > `.env` > profile file > defaults; no secrets committed.
-  **`prod` refuses to boot** without all three datastore URLs (ADR 0005); the
-  `test` profile ignores the root `.env` so the suite stays hermetic.
+  **`prod` refuses to boot** without all three datastore URLs *or its
+  `ANTHROPIC_API_KEY`* (ADR 0005, 0006); the `test` profile ignores the root
+  `.env` so the suite stays hermetic.
 - **Prometheus metrics** — request counter + latency histogram, labelled by
   route template; scraped successfully by the Prometheus container.
 - **Global error handling** — uniform `{"error": {...}}` envelope; 500s never
@@ -125,40 +144,48 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
 - **Lifespan hooks** — `service.startup` / `service.shutdown`.
 - **Docker Compose stack** — api (multi-stage, **non-root** uid 1001), postgres,
   redis, qdrant, prometheus, grafana (datasource provisioned as code).
-- **Quality gate** — ruff, ruff-format, mypy `strict`, pytest (56 tests),
+- **Quality gate** — ruff, ruff-format, mypy `strict`, pytest (185 tests),
   pre-commit; GitHub Actions runs all of it plus a Docker build against live
   postgres/redis/qdrant service containers, asserting `/ready` reports every
   store `ok` and that chat + SSE work.
 
 ### ❌ Does not exist yet
 
-No LLM calls · no agents · no RAG/vector search · **no authentication** · no
-OpenTelemetry backend · no Grafana dashboards · no Kubernetes/Terraform · no
-evaluation · no load testing.
+No RAG/vector search · **no authentication** · no OpenTelemetry backend · no
+Grafana dashboards · no Kubernetes/Terraform · no evaluation · no load testing.
 
-Postgres, Redis and Qdrant are now **connected and probed**, but nothing is
-persisted: no schema, migrations, cache reads/writes, or vector operations.
-Qdrant is only reached for `GET /readyz`.
+**Qdrant is still connected and probed but holds no data** — it is reached only
+for `GET /readyz`, and belongs to Stage 4. Postgres and Redis now hold real data
+(conversation history and its cache).
+
+Within the agent stack, deliberately deferred: prompt caching, context
+compaction (a long enough conversation will exceed the context window and fail),
+per-conversation concurrency control, and retry / circuit breaking around the
+Anthropic call beyond the SDK's defaults (Stage 9).
 
 API versioning (`/v1`) is in place, but **pagination conventions are deferred** —
-Stage 2 added no listable resources, so there is nothing to paginate. Revisit
-when an endpoint returns a collection.
+no endpoint returns a collection yet. Revisit when one does.
 
 ---
 
-## Next milestone — Stage 3 (Agents)
+## Next milestone — Stage 4 (RAG)
 
-**Objective:** replace the mock engine with a real agent loop.
+**Objective:** grounded answers with citations.
 
 Expected scope:
 
-1. Implement `Agent` and `Orchestrator` (currently stubs raising `NotImplementedError`).
-2. LangGraph-based orchestration; promote the `orchestration` extra to base deps.
-3. An orchestrator-backed `CompletionEngine` swapped in behind the existing
-   protocol — the routes and SSE plumbing should not change.
-4. Real model calls, real token accounting, tool use.
-5. Conversation state in Postgres / caching in Redis.
+1. Implement `Retriever` / `VectorStore` (currently stubs raising `NotImplementedError`).
+2. LlamaIndex ingestion + chunking; embeddings; promote the `retrieval` extra.
+3. Qdrant-backed vector search — swap the Stage 2 `httpx` readiness probe for
+   `qdrant-client` behind the same `Datastore` contract.
+4. A retrieval tool in the agent's registry, so the loop can ground its answers.
+5. Citations in the response.
 
-**Prerequisites** (all met): the `CompletionEngine` seam + `get_engine`
-dependency, SSE plumbing proven against a mock, pooled datastores, CI gate green.
-See [stage-02-api.md § Prerequisites for Stage 3](stage-summaries/stage-02-api.md#9-prerequisites-for-stage-3).
+**Prerequisites** (all met): the agent loop and its `ToolRegistry` (a retrieval
+tool is a new `Tool`, not a new loop), the `Datastore` seam, Qdrant already
+pooled and probed, and conversation persistence.
+
+**Note for Stage 4:** Stage 3's tools are pure functions of their arguments,
+which is what makes tool results safe to feed back into the model unexamined.
+A retrieval tool returns *document text* — potentially attacker-controlled — so
+prompt injection through tool results becomes a real concern the moment it lands.

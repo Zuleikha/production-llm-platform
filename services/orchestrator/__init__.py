@@ -1,7 +1,7 @@
-"""Orchestrator service (interface stub — Stage 3+)."""
+"""Orchestrator service — the agent loop, its model client and conversation state."""
 
 from __future__ import annotations
 
-from services.orchestrator.base import Orchestrator
+from services.orchestrator.base import AgentOrchestrator, Orchestrator
 
-__all__ = ["Orchestrator"]
+__all__ = ["AgentOrchestrator", "Orchestrator"]

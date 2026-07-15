@@ -18,6 +18,11 @@ Every ADR uses: **Context** (the forces at play) → **Decision** (what we chose
 | [0003](0003-configuration-approach.md) | Configuration approach | Accepted | 1 |
 | [0004](0004-streaming-transport.md) | Streaming transport for chat completions | Accepted | 2 |
 | [0005](0005-datastore-connection-pooling.md) | Datastore connection pooling and readiness | Accepted | 2 |
+| [0006](0006-agent-loop-and-orchestration.md) | Agent loop, orchestration and the model client | Accepted | 3 |
+| [0007](0007-database-migrations.md) | Database migrations: raw SQL, forward-only | Accepted | 3 |
+| [0008](0008-conversation-caching-strategy.md) | Conversation caching: Redis read-through, Postgres owns the truth | Accepted | 3 |
+| [0009](0009-hermetic-llm-testing.md) | The test profile cannot call Anthropic | Accepted | 3 |
+| [0010](0010-pre-rendered-diagrams.md) | Architecture diagrams are pre-rendered inline SVG | Accepted | 3 |
 
 ## Conventions
 

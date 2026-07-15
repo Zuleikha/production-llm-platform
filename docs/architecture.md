@@ -7,18 +7,22 @@
 >
 > **This file is the source of truth.** `architecture.html` at the repo root is
 > generated from it (`uv run python scripts/build_architecture.py`) and a test
-> fails if the two drift. Edit this file, never the HTML.
+> fails if the two drift. Edit this file, never the HTML. Diagrams are
+> pre-rendered to inline SVG under `docs/diagrams/` — the page has no CDN and no
+> JavaScript, and renders offline (ADR 0010).
 
-**Stage 2 of 10 (API).** The platform today is a FastAPI service that serves a
-chat completion endpoint with SSE streaming, holds pooled connections to
-Postgres, Redis and Qdrant, and reports honest readiness by probing them.
+**Stage 3 of 10 (Agents).** The platform today is a FastAPI service whose chat
+endpoint runs a **real LangGraph agent loop against the Anthropic API**: it
+reasons, calls tools, observes the results, and answers — persisting the
+conversation to Postgres behind a Redis read-through cache, and reporting the
+model's own token counts.
 
-**No LLM is called yet.** The chat endpoint is backed by a deterministic
-`EchoEngine` behind a `CompletionEngine` protocol — the seam Stage 3 fills.
+**Stage 2's `EchoEngine` is gone.** The `CompletionEngine` protocol it sat behind
+is unchanged, which is what let the swap happen without redesigning the endpoint.
 
 ---
 
-## Current state (Stage 2 — built and verified)
+## Current state (Stage 3 — built and verified)
 
 ### Component map
 
@@ -30,7 +34,7 @@ flowchart TD
         direction TB
         mw["RequestContextMiddleware<br/>request-id · metrics · access log"]
         routes["routes: health · meta · chat"]
-        engine["CompletionEngine<br/>EchoEngine — mock<br/>Stage 3 swaps this"]
+        engine["CompletionEngine<br/>OrchestratorEngine"]
         registry["DatastoreRegistry<br/>pools · lifespan · probe"]
 
         mw --> routes
@@ -38,11 +42,32 @@ flowchart TD
         routes -->|"GET /ready"| registry
     end
 
-    pg[("postgres<br/>asyncpg pool")]
-    rd[("redis<br/>redis.asyncio pool")]
-    qd[("qdrant<br/>httpx → /readyz")]
+    subgraph agent["agent stack (Stage 3)"]
+        direction TB
+        orch["AgentOrchestrator<br/>history · usage · persistence"]
+        loop["AgentGraph (LangGraph)<br/>reason ⇄ act"]
+        tools["ToolRegistry<br/>calculator · text_stats · json_query"]
+        llm["LLMClient<br/>AnthropicClient"]
+
+        orch --> loop
+        loop --> tools
+        loop --> llm
+    end
+
+    store["ConversationStore<br/>Redis read-through → Postgres"]
+
+    pg[("postgres<br/>asyncpg pool<br/>conversations")]
+    rd[("redis<br/>redis.asyncio pool<br/>history cache")]
+    qd[("qdrant<br/>httpx → /readyz<br/>no data — Stage 4")]
+
+    anthropic(["Anthropic API<br/>claude-opus-4-8"])
 
     client --> mw
+    engine --> orch
+    orch --> store
+    store --> rd
+    store --> pg
+    llm --> anthropic
     registry --> pg
     registry --> rd
     registry --> qd
@@ -50,18 +75,21 @@ flowchart TD
     prom["prometheus"] -->|"scrapes /metrics"| api
     graf["grafana"] -->|"datasource"| prom
 
-    classDef mock fill:#fff4e6,stroke:#e8a33d,color:#7a4a00
+    classDef external fill:#ede7ff,stroke:#7b5cd6,color:#2c1a66
     classDef store fill:#e8f4ff,stroke:#4a90d9,color:#0a3d62
-    class engine mock
-    class pg,rd,qd store
+    classDef unbuilt fill:#f4f4f4,stroke:#999,color:#555
+    class anthropic external
+    class pg,rd store
+    class qd unbuilt
 ```
 
-`shared/` (`config` · `logging` · `observability` · `datastores` · `version`) is
-imported throughout the service rather than sitting in the request path — it is
-left out of the diagram above to keep the flow readable.
+`shared/` (`config` · `logging` · `observability` · `datastores` · `migrations` ·
+`version`) is imported throughout the service rather than sitting in the request
+path — it is left out of the diagram above to keep the flow readable.
 
-Postgres, Redis and Qdrant are **connected and probed**, but nothing is
-persisted yet — no schema, migrations, cache reads/writes or vector operations.
+Postgres and Redis now **hold real data**: conversation history and its cache.
+Qdrant is still only reached for `GET /readyz` and holds nothing — it belongs to
+Stage 4.
 
 ### The `api` service
 
@@ -114,33 +142,68 @@ flowchart TD
     class note nte
 ```
 
+### The agent loop
+
+Both transports run the **same** LangGraph graph, so streaming is a transport
+choice and cannot change the answer. `reason` calls the model; `act` executes
+every requested tool and feeds the results back; the loop ends when the model
+answers instead of calling a tool, or when the step cap trips. See ADR 0006.
+
+```mermaid
+flowchart LR
+    start([task]) --> reason["reason<br/><i>call the model</i>"]
+    reason --> decide{"asked for<br/>a tool?"}
+    decide -->|no| answer([final answer])
+    decide -->|"yes, and steps < max"| act["act<br/><i>execute tools</i>"]
+    decide -->|"yes, but step cap hit"| answer
+    act -->|"observe: tool_result"| reason
+
+    classDef good fill:#e9f7ec,stroke:#4caf7d,color:#0a4a2a
+    classDef node fill:#e8f4ff,stroke:#4a90d9,color:#0a3d62
+    class answer good
+    class reason,act node
+```
+
+A tool that fails returns an `is_error` result rather than raising: the model
+asked for something that did not work, and the useful response is to tell it so
+it can correct itself — not to throw away a run the caller already paid for.
+
 ### Chat completion and streaming
 
-Both paths run the **same** `CompletionEngine`, so streaming is purely a
-transport choice and cannot change the answer (a test asserts the streamed and
-non-streamed bodies are identical). SSE framing is specified in ADR 0004.
+SSE framing is specified in ADR 0004 and is **unchanged** from Stage 2. What
+changed is `usage`: it now carries the model's own counts, summed across every
+model call the run made.
 
 ```mermaid
 sequenceDiagram
     participant C as client
     participant R as routes/chat.py
-    participant E as CompletionEngine<br/>(EchoEngine)
+    participant O as AgentOrchestrator
+    participant G as AgentGraph
+    participant A as Anthropic API
+    participant T as ToolRegistry
 
     C->>R: POST /v1/chat/completions
-    Note over R: Pydantic validation<br/>≥1 message · role enum<br/>max_tokens > 0 · 0 ≤ temp ≤ 2
+    Note over R: Pydantic validation<br/>≥1 message · role enum<br/>max_tokens > 0
+
+    R->>O: complete / stream
+    O->>O: load history (Redis → Postgres)
+
+    O->>G: run(messages)
+    G->>A: messages.stream(tools=[...])
+    A-->>G: tool_use: calculator("129 * 47")
+    G->>T: invoke
+    T-->>G: "6063"
+    G->>A: messages.stream(+ tool_result)
+    A-->>G: text: "129 * 47 = 6063."
+
+    O->>O: persist turn · invalidate cache
 
     alt stream = false
-        R->>E: complete(messages)
-        E-->>R: full text
-        R-->>C: 200 {"object":"chat.completion", choices, usage}
+        R-->>C: 200 {choices, usage: real counts}
     else stream = true
-        R-->>C: 200 text/event-stream
-        R->>E: stream(messages)
-        E-->>R: "You"
-        R-->>C: data: {delta:{role:"assistant",content:"You"}}
-        E-->>R: " said:"
-        R-->>C: data: {delta:{content:" said:"}}
-        R-->>C: data: {delta:{}, finish_reason:"stop"}
+        R-->>C: data: {delta:{role,content}}
+        R-->>C: data: {delta:{}, finish_reason}
         R-->>C: data: [DONE]
     end
 ```
@@ -153,6 +216,7 @@ sequenceDiagram
 | `logging.py` | JSON formatter (`timestamp`, `level`, `service`, `environment`, `request_id`, `logger`, `message`, `exception`) + console formatter; routes uvicorn logs through one handler |
 | `observability.py` | `@traced` — logs span enter/exit/duration/error; sync + async; PEP 695 typed |
 | `datastores.py` | `Datastore` ABC + Postgres/Redis/Qdrant implementations and `DatastoreRegistry` — see ADR 0005 |
+| `migrations.py` | Forward-only raw-SQL migration runner, applied in the lifespan — see ADR 0007 |
 | `version.py` | `__version__`, kept in sync with `pyproject.toml` by a test |
 
 ### Datastore lifecycle
@@ -184,6 +248,43 @@ rather than a crash loop. Connects run concurrently — serialised, three dead
 stores delayed `/health` by ~20s (measured), long enough to trip a liveness probe
 and cause the very crash loop the design avoids.
 
+### Conversation state and caching
+
+Postgres owns the data; Redis only ever holds a copy. Losing Redis costs latency,
+never history. Writes **invalidate** the cache rather than rewriting it —
+deleting cannot disagree with Postgres, whereas computing the new value twice
+can. See ADR 0008.
+
+```mermaid
+flowchart TD
+    req["chat request<br/>with conversation_id"] --> load{"history in<br/>Redis?"}
+    load -->|hit| use["use cached history"]
+    load -->|"miss or Redis down"| pgread[("read Postgres")]
+    pgread --> populate["populate cache (TTL)"]
+    populate --> use
+    use --> run["run the agent loop"]
+    run --> write[("append turn to Postgres")]
+    write --> inval["DELETE the cache entry"]
+
+    note["Postgres first, invalidate second:<br/>the other order lets a concurrent read<br/>re-cache the pre-append history"]
+
+    classDef store fill:#e8f4ff,stroke:#4a90d9,color:#0a3d62
+    classDef nte fill:#f4f4f4,stroke:#999,color:#333
+    class pgread,write store
+    class note nte
+```
+
+A request **without** a `conversation_id` is stateless and touches neither store
+— the Stage 2 contract (client sends the full history) still holds exactly.
+
+**Schema** (`migrations/0001_conversations.sql`, applied on startup):
+
+| Table | Purpose |
+|-------|---------|
+| `conversations` | One row per conversation: `id`, `created_at`, `updated_at` |
+| `conversation_messages` | `conversation_id` -> `position` · `role` · `content`, unique on `(conversation_id, position)`, cascading delete |
+| `schema_migrations` | Applied versions; what makes the runner idempotent |
+
 ### Infrastructure (Docker Compose)
 
 `api` (built, non-root, multi-stage), `postgres`, `redis`, `qdrant`,
@@ -194,10 +295,14 @@ container — see CLAUDE.md).
 
 ### Quality gate
 
-ruff (lint + format) · mypy `strict` · pytest (56 tests) · pre-commit · GitHub
+ruff (lint + format) · mypy `strict` · pytest (185 tests) · pre-commit · GitHub
 Actions running the same commands, **plus** a Docker job that boots the container
 against live postgres/redis/qdrant service containers and fails unless `/ready`
 reports every store `ok` and the chat + SSE contract holds.
+
+The suite is **hermetic by construction**: the `test` profile cannot construct a
+real Anthropic client at all, so no test can make a paid API call regardless of
+what is in the environment (ADR 0009). CI needs no `ANTHROPIC_API_KEY`.
 
 ---
 
@@ -208,9 +313,6 @@ builds it.
 
 | Component | Stage | Status today |
 |-----------|-------|--------------|
-| `services/agents` — `Agent` ABC | 3 | **Not implemented.** `run()` raises `NotImplementedError`. |
-| `services/orchestrator` — `Orchestrator` ABC (LangGraph); real model calls behind `CompletionEngine` | 3 | **Not implemented.** Raises. `EchoEngine` is the mock in its place. |
-| Conversation state (Postgres schema/migrations), caching (Redis) | 3 | **Not implemented.** Both are connected but unused. |
 | `services/retrieval` — `Retriever` Protocol, `VectorStore` ABC (LlamaIndex + Qdrant) | 4 | **Not implemented.** Raises. Qdrant is reached only for `GET /readyz` and holds no data. |
 | `services/monitoring` — `SpanExporter`; OpenTelemetry export, Grafana dashboards, alerts | 5 | **Not implemented.** `@traced` logs only; no OTel backend, no dashboards. |
 | `services/evaluation` — `Evaluator` ABC | 6 | **Not implemented.** Raises. |
@@ -218,11 +320,17 @@ builds it.
 | `services/security` — `AuthProvider`, `Guardrail` | 8 | **Not implemented.** API is entirely unauthenticated. |
 | Reliability — load testing, chaos, SLOs, pool tuning, reconnect/circuit breaking | 9 | **Nothing exists.** |
 
-### Deliberate non-goals for Stage 2
+### Deliberate non-goals for Stage 3
 
-No LLM calls, no agents, no persistence, no vector search, no authentication, no
-OTel backend, no Kubernetes. Pagination conventions are deferred — no endpoint
-returns a collection yet.
+No RAG or vector search, **no authentication**, no OTel backend, no evaluation,
+no Kubernetes. Pagination conventions are still deferred — no endpoint returns a
+collection yet.
+
+Within the agent stack specifically, these are deliberate omissions rather than
+oversights: no prompt caching, no context compaction (a long enough conversation
+will eventually exceed the context window), no per-conversation concurrency
+control, and no retry or circuit breaking around the Anthropic call beyond the
+SDK's own defaults. Stage 9 owns the reliability of that call.
 
 ---
 
@@ -230,14 +338,20 @@ returns a collection yet.
 
 **Stable seams.** `@traced` is the tracing seam (Stage 5 makes it emit OTel spans
 without touching a single call site). `get_settings()` is the config seam.
-`CompletionEngine` is the model seam (Stage 3 swaps `EchoEngine` for an
-orchestrator without touching a route). `Datastore` is the storage seam (Stage 4
-swaps Qdrant's HTTP probe for `qdrant-client`). Later stages fill seams; they do
-not re-cut them.
+`CompletionEngine` is the model seam — **Stage 3 proved it**: `EchoEngine` was
+replaced by a full agent stack and the endpoint, the SSE framing and the wire
+format did not change. `LLMClient` is the new model-provider seam, and the point
+at which the test profile is made hermetic. `Datastore` is the storage seam
+(Stage 4 swaps Qdrant's HTTP probe for `qdrant-client`). Later stages fill seams;
+they do not re-cut them.
 
 **Fail loud.** Invalid config fails at startup — `prod` will not boot without its
-datastore URLs. Unbuilt components raise `NotImplementedError`. Errors are
-surfaced and logged with traces, never swallowed.
+datastore URLs *or its `ANTHROPIC_API_KEY`*. Unbuilt components raise
+`NotImplementedError`. Errors are surfaced and logged with traces, never
+swallowed. The two deliberate exceptions are both places where degrading beats
+failing: a datastore that is down at boot yields an un-ready pod rather than a
+crash loop (ADR 0005), and a Redis failure costs a cache hit rather than the
+request (ADR 0008).
 
 **Honest health.** `/ready` reflects reality: it dials its dependencies and says
 503 when they are down. `/health` answers only "is this process alive?".
@@ -247,8 +361,11 @@ laptop, CI and image resolve identically. `link-mode = "copy"` stops uv's
 cross-drive hardlink install from silently skipping a package.
 
 **Security posture from day one.** No secrets in git (enforced by test +
-`.gitignore`), credentials from env only, container runs as non-root, internal
-error text never reaches clients.
+`.gitignore`), credentials — including `ANTHROPIC_API_KEY` — from env only,
+container runs as non-root, internal error text never reaches clients. The
+calculator tool parses to an AST and walks an allow-list rather than calling
+`eval`: the model is not a trusted caller, and neither is whatever talked to it.
+**The API is still entirely unauthenticated** — that is Stage 8.
 
 ## See also
 
@@ -257,4 +374,9 @@ error text never reaches clients.
 - [ADR 0003 — Configuration approach](adr/0003-configuration-approach.md)
 - [ADR 0004 — Streaming transport](adr/0004-streaming-transport.md)
 - [ADR 0005 — Datastore connection pooling and readiness](adr/0005-datastore-connection-pooling.md)
+- [ADR 0006 — Agent loop and orchestration](adr/0006-agent-loop-and-orchestration.md)
+- [ADR 0007 — Database migrations](adr/0007-database-migrations.md)
+- [ADR 0008 — Conversation caching strategy](adr/0008-conversation-caching-strategy.md)
+- [ADR 0009 — Hermetic LLM testing](adr/0009-hermetic-llm-testing.md)
+- [ADR 0010 — Pre-rendered architecture diagrams](adr/0010-pre-rendered-diagrams.md)
 - [PROJECT_STATUS.md](PROJECT_STATUS.md) — roadmap and progress

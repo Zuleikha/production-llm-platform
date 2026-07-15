@@ -33,6 +33,11 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-platform}:${POSTGRES_PASSWORD:-platform}@postgres:5432/${POSTGRES_DB:-platform}
       REDIS_URL: redis://redis:6379/0
       QDRANT_URL: http://qdrant:6333
+      # Passed through from the host shell — NEVER hardcoded here (this file is
+      # committed). Without it the container boots and /health is fine, but every
+      # chat request fails: `dev` does not require the key at boot, only `prod`
+      # does (ADR 0006). Export it before `docker compose up`.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

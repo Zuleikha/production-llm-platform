@@ -85,6 +85,17 @@ class PostgresDatastore(Datastore):
     def configured(self) -> bool:
         return self._url is not None
 
+    @property
+    def pool(self) -> asyncpg.Pool[asyncpg.Record] | None:
+        """The live pool, or None when unconfigured or not yet connected.
+
+        Exposed for Stage 3's conversation store, which needs to issue real
+        queries. Returning None rather than raising keeps the caller's "no
+        datastore, no persistence" path the same shape as `/ready`'s
+        `not_configured`.
+        """
+        return self._pool
+
     @traced
     async def connect(self) -> None:
         if self._url is None:  # pragma: no cover - registry never connects these
@@ -125,6 +136,15 @@ class RedisDatastore(Datastore):
     @property
     def configured(self) -> bool:
         return self._url is not None
+
+    @property
+    def client(self) -> aioredis.Redis | None:
+        """The live client, or None when unconfigured or not yet connected.
+
+        Exposed for Stage 3's conversation cache. See `PostgresDatastore.pool`
+        for why this returns None rather than raising.
+        """
+        return self._client
 
     @traced
     async def connect(self) -> None:
@@ -246,6 +266,22 @@ class DatastoreRegistry:
             ],
             probe_timeout=settings.datastore_probe_timeout_seconds,
         )
+
+    def get(self, name: str) -> Datastore | None:
+        """Return the datastore called ``name``, or None if there isn't one."""
+        return next((s for s in self.datastores if s.name == name), None)
+
+    @property
+    def postgres_pool(self) -> asyncpg.Pool[asyncpg.Record] | None:
+        """The Postgres pool, if Postgres is configured and connected."""
+        store = self.get("postgres")
+        return store.pool if isinstance(store, PostgresDatastore) else None
+
+    @property
+    def redis_client(self) -> aioredis.Redis | None:
+        """The Redis client, if Redis is configured and connected."""
+        store = self.get("redis")
+        return store.client if isinstance(store, RedisDatastore) else None
 
     @traced
     async def startup(self) -> None:

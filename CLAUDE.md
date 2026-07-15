@@ -3,148 +3,147 @@
 Read at the start of every session. Keep under ~150 lines. Facts only — rationale
 lives in `docs/adr/`.
 
-## Current state
+## Current state — **Stage 3 of 10 (Agents), COMPLETE.** Version `0.1.0`
 
-**Stage 2 of 10 (API) — COMPLETE.** Version `0.1.0`.
+`POST /v1/chat/completions` runs a **real LangGraph agent loop against the
+Anthropic API** (`claude-opus-4-8`): reason → tool → observe → answer, bounded by
+`agent_max_steps`. Real token usage, summed across every model call. History
+persists to Postgres behind a Redis cache when the request carries a
+`conversation_id`; without one it is stateless as in Stage 2. Stage 2's
+`EchoEngine` is **gone** — the `CompletionEngine` seam held; routes and SSE wire
+format unchanged. **No RAG, no auth** — still stubs. Qdrant is probed, holds no
+data (Stage 4).
 
-Stage 1's service plus: `POST /v1/chat/completions` with SSE streaming, pooled
-Postgres/Redis/Qdrant connections opened in the lifespan, and a `/ready` that
-does real dependency probes (503 when any is unavailable). **No LLM call is
-made** — the endpoint is backed by a deterministic `EchoEngine` behind a
-`CompletionEngine` protocol that Stage 3 swaps out. **No agent, RAG or auth
-exists yet**; those folders are stubs that raise `NotImplementedError`.
-Datastores are connected and probed but **nothing is persisted** — no schema,
-migrations, cache use, or vector ops.
-
-Roadmap + progress: **`docs/PROJECT_STATUS.md`** (canonical).
-Stage detail: `docs/stage-summaries/stage-0{1-foundation,2-api}.md`.
-Why anything is the way it is: **`docs/adr/`** (0001 stack, 0002 structure,
-0003 config, 0004 streaming transport, 0005 datastore pooling).
+Roadmap: **`docs/PROJECT_STATUS.md`** (canonical). Stage detail:
+`docs/stage-summaries/stage-0{1-foundation,2-api,3-agents}.md`. Rationale:
+**`docs/adr/`** — 0001 stack · 0002 structure · 0003 config · 0004 streaming ·
+0005 pooling · 0006 agent loop · 0007 migrations · 0008 caching · 0009 hermetic
+LLM tests · 0010 pre-rendered diagrams.
 
 ## Layout
 
 ```
-services/api/      ✅ only implemented service. app.py · routes/{health,meta,chat}
-                   schemas.py · completions.py (CompletionEngine seam) · errors · middleware
-services/{agents,orchestrator,retrieval,evaluation,monitoring,security}/  ⬜ stubs
-shared/            config · logging · observability · version · datastores
-config/environments/{dev,test,prod}.env    committed, NON-SECRET defaults
-tests/             a package (__init__.py); fakes.py = shared test doubles; unit/ mirrors source
-docs/              architecture · adr · runbooks · stage-summaries · verification-log · prompts
-architecture.html  GENERATED from docs/architecture.md — see Conventions
-infrastructure/    docker ✅ · kubernetes ⬜ · terraform ⬜
+services/api/    app.py · routes/{health,meta,chat} · schemas.py
+                 completions.py = CompletionEngine seam + OrchestratorEngine
+services/agents/ base.py (Agent · ToolAgent) · tools.py (registry, 3 tools)
+services/orchestrator/  base.py (Orchestrator · AgentOrchestrator) · graph.py
+                 (LangGraph) · llm.py (LLMClient seam) · conversations.py
+services/{retrieval,evaluation,monitoring,security}/  ⬜ stubs
+shared/          config · logging · observability · datastores · migrations · version
+migrations/      NNNN_name.sql — forward-only, applied in the lifespan
+tests/           fakes.py = shared doubles; unit/ mirrors source
+docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.md
 ```
 
 ## Conventions
 
 - **Stubs:** future-stage folders get a `README.md` (contract + owning stage) plus
-  an ABC/Protocol whose methods `raise NotImplementedError`. Never a working
-  mini-version.
+  an ABC/Protocol whose methods `raise NotImplementedError`. Never a mini-version.
 - **Naming:** `snake_case` modules/functions, `PascalCase` classes, `_private`.
   ADRs `NNNN-kebab-title.md`. Stage summaries + verification logs have **fixed**
-  filenames — see PROJECT_STATUS.
-- **Config:** one `Settings` (pydantic-settings) in `shared/config.py`, read via
-  `get_settings()` (`lru_cache`d), injected with `Depends(get_settings)`.
-  Precedence: OS env > `.env` > `config/environments/<ENVIRONMENT>.env` >
-  defaults. `ENVIRONMENT` = `dev`|`test`|`prod`. **No secrets in committed files**
-  — credentials come from OS env only (a test enforces this). **`prod` requires
-  all three datastore URLs** and refuses to construct without them; the `test`
-  profile ignores the root `.env` to stay hermetic.
-- **Datastores:** `DatastoreRegistry.from_settings()` on `app.state.datastores`,
-  via the `get_datastores` dependency. No URL = `not_configured`, never dialled.
-  `startup()` is concurrent and **never raises** — failures surface on `/ready`,
-  not as a crash loop. `/health` must **never** probe (tripwire test enforces).
-- **Chat:** routes call the `CompletionEngine` protocol on `app.state.engine`
-  (`get_engine` dependency), never `services.orchestrator` directly. Stage 2's
-  `EchoEngine` is a mock; Stage 3 substitutes behind the same protocol.
+  filenames — see PROJECT_STATUS. `config/environments/*.env` are committed,
+  NON-SECRET.
+- **Config:** one `Settings` (pydantic-settings) via `get_settings()` (`lru_cache`d).
+  Precedence: OS env > `.env` > `config/environments/<ENV>.env` > defaults. **No
+  secrets committed** — OS env only (a test enforces it). **`prod` requires all three
+  datastore URLs + `ANTHROPIC_API_KEY`**; `test` ignores the root `.env`.
+- **Datastores:** `DatastoreRegistry.from_settings()` on `app.state.datastores`. No
+  URL = `not_configured`, never dialled. `startup()` is concurrent and **never
+  raises** — failures surface on `/ready`, not a crash loop. `/health` must **never**
+  probe (tripwire enforces).
+- **LLM — read ADR 0009 before touching:** the `test` profile **cannot construct**
+  `AnthropicClient`; it raises before the key is read. Always go via
+  `build_llm_client(settings)`. The guard keys on the *profile*, not the key's
+  absence, so a dev with `ANTHROPIC_API_KEY` exported gets CI's exact hermetic
+  suite. Never replace this with "remember to mock it".
+- **No sampling params.** Claude Opus 4.7+ **rejects `temperature`/`top_p`/`top_k`
+  with a 400**; `budget_tokens` is gone (use `thinking={"type":"adaptive"}`).
+  `ChatCompletionRequest.temperature` is accepted for wire compat and deliberately
+  **not forwarded**. `max_tokens` is **required** on every API call.
+- **Agent:** routes call the `CompletionEngine` on `app.state.engine`;
+  `create_app(settings, engine=...)` overrides it (and stops the lifespan rebuilding
+  it). Tools must be **deterministic and offline** — the suite runs the real loop.
+  `calculator` walks an AST allow-list; **never `eval`** — the model is not a trusted
+  caller. A failing tool returns `is_error` rather than raising.
+- **Persistence:** Postgres is the source of truth, Redis only caches. Writes
+  **invalidate** (Postgres first, then `DELETE`) — never rewrite. A Redis failure
+  degrades to a Postgres read: the **one** sanctioned exception to fail-loud
+  (ADR 0008). Migrations are plain SQL, forward-only, advisory-locked.
 - **Logging:** `get_logger(__name__)`; log **events** not sentences —
-  `_logger.info("http.request", extra={...})`. One JSON object per line with
-  `timestamp, level, service, environment, request_id, logger, message` (+
-  `exception` trace on errors). Never log PII/secrets/tokens.
-- **Tracing:** `@traced` on new application functions. **Exempt:** `shared/logging.py`
-  + `shared/observability.py` (recursion), and async generators/lifespan.
-- **Errors:** fail loud. Uniform envelope `{"error": {type, message, request_id}}`.
-  500s never leak internals. Handlers registered against **Starlette's**
-  `HTTPException` (its base), so unmatched-route 404s are caught.
-- **Types:** mypy `strict`, everything annotated incl. tests. Narrow with
-  `isinstance` rather than `# type: ignore`.
-- **Deps:** exact `==` pins, `uv.lock` committed, `--frozen` installs. Future-stage
-  libs live in `[project.optional-dependencies]`.
+  `_logger.info("http.request", extra={...})`. One JSON object per line. Never log
+  PII/secrets/tokens. **Tracing:** `@traced` on new application functions; **exempt:**
+  `shared/{logging,observability}.py` (recursion), async generators/lifespan, and
+  LangGraph nodes (the graph inspects signatures).
+- **Errors:** fail loud. Envelope `{"error": {type, message, request_id}}`; 500s
+  never leak internals. Handlers on **Starlette's** `HTTPException`.
+- **Types:** mypy `strict`, everything annotated incl. tests. Narrow with `isinstance`
+  rather than `# type: ignore`. Depend on narrow Protocols (`CacheBackend`,
+  `LLMClient`) not concrete driver types. **Deps:** exact `==` pins, `uv.lock`
+  committed, `--frozen` installs.
 - **Tests:** `tests/unit/`, mirror source. Test contracts, not internals. Write the
   failing test first; never edit a test to make it pass. Switching profiles needs
   `monkeypatch.setenv` **+** `get_settings.cache_clear()`.
-- **Architecture doc:** `docs/architecture.md` is the source; `architecture.html`
-  (repo root, visual, Mermaid) is **generated** by `scripts/build_architecture.py`.
-  Never edit the HTML. **Every stage updates the md + regenerates** — test fails on drift.
+- **Architecture doc:** `docs/architecture.md` is the source; `architecture.html` is
+  **generated** by `scripts/build_architecture.py` — never edit the HTML. Diagrams
+  are **pre-rendered SVG** in `docs/diagrams/` — no CDN, no JS (ADR 0010). Changing
+  one needs Node/`npx`; building + `--check` need only Python. A Mermaid keyword
+  (`graph`, `end`) as a node id fails the render. **Every stage updates the md +
+  regenerates** — a test fails on drift.
 
 ## Run / test / lint
 
 ```bash
 uv sync                                        # install
+export ANTHROPIC_API_KEY=sk-ant-...            # real calls only; never dev/test
 uv run uvicorn services.api.app:app --reload   # API only  -> :8000
 docker compose up -d --build                   # full stack
-./scripts/smoke_health.sh                      # verify /health = 200
-
 pwsh scripts/verify.ps1   # or ./scripts/verify.sh — the whole gate
-uv run ruff check . --fix ; uv run ruff format .
-uv run mypy               # strict
-uv run pytest -v
-
-uv run python scripts/build_architecture.py   # regenerate architecture.html
+uv run ruff check . --fix ; uv run ruff format . ; uv run mypy ; uv run pytest -v
+uv run python scripts/build_architecture.py   # regenerate (needs npx for diagrams)
+# Opt-in live-datastore tests (docker compose up -d postgres redis): set
+# TEST_DATABASE_URL + TEST_REDIS_URL — see docs/stage-summaries/stage-03-agents.md
 ```
 
-Endpoints: `/health` `/ready` `/version` `/metrics` `/docs`
-`POST /v1/chat/completions` (`"stream": true` for SSE).
+Endpoints: `/health` `/ready` `/version` `/metrics` `/docs` ·
+`POST /v1/chat/completions` (`"stream": true` for SSE; optional `conversation_id`).
 Prometheus :9090 · Grafana :3001 (see quirks).
 
-## Known environment quirks
+## Known environment quirks — this machine, not the code
 
-This machine, not the code. Check here before assuming a bug.
-
-- **Cross-drive uv / lock-install mismatch.** The uv cache is on `C:`, the repo
-  on `D:`. uv's default hardlink mode fails across drives, and fails **silently**
-  — the package stays in `uv.lock` but never lands in the venv, surfacing later
-  as a baffling `ModuleNotFoundError`. Fixed repo-wide by `link-mode = "copy"`
-  under `[tool.uv]`, so a fresh clone is safe on any drive; `UV_LINK_MODE=copy`
-  (User env var + `scripts/verify.*`) is now redundant belt-and-braces. If a
-  locked package still won't import, diff `uv pip list` against `uv.lock` before
-  assuming a code bug. `sniffio` stays pinned as an explicit direct dep (normally
-  transitive via `anyio`) from when this bit before the cause was understood.
-- **Do not use the system Python at `D:\Python\Python312`.** It is a
-  stripped/embeddable build: no `venv` module, DLLs in the install root, and a
-  venv made from it resolves `sys.base_prefix` wrongly and **segfaults on
-  `import ctypes`** (surfacing as an access violation importing `httpx`, since
-  `httpx`→`click`→`ctypes`). Use a uv-managed interpreter:
-  `uv python install 3.12 && uv venv --managed-python --python 3.12`.
-  The venv currently runs managed CPython **3.12.13**.
-- **Grafana port 3000 conflicts with `open-webui`.** An unrelated container on
-  this machine binds host port 3000 first, so Grafana fails to start with
-  "port is already allocated". Host port remapped to **3001** in
-  `docker-compose.yml` (`"3001:3000"`). Check `docker ps` for port collisions
-  before assuming a compose config bug.
+- **Cross-drive uv / lock-install mismatch.** uv cache on `C:`, repo on `D:`.
+  uv's default hardlink mode fails across drives **silently** — the package stays
+  in `uv.lock` but never lands in the venv, surfacing as a baffling
+  `ModuleNotFoundError`. Fixed repo-wide by `link-mode = "copy"` under `[tool.uv]`
+  — do not remove. If a locked package won't import, diff `uv pip list` against
+  `uv.lock` first. `sniffio` stays an explicit direct dep from when this bit.
+- **Do not use the system Python at `D:\Python\Python312`.** Stripped build: a venv
+  from it **segfaults on `import ctypes`** (surfaces as an access violation importing
+  `httpx`). Use `uv python install 3.12 && uv venv --managed-python --python 3.12`.
+  The venv runs managed CPython **3.12.13**.
+- **Grafana port 3000 conflicts with `open-webui`.** Remapped to **3001** in
+  `docker-compose.yml`; check `docker ps` for collisions first. **Docker Desktop
+  must be running** for live-datastore tests — `docker compose version` works
+  without the daemon, `docker ps` is the real check.
 
 ## Deferred — do NOT build early
 
 | Stage | Deferred |
 |:--:|---|
-| 3 | Real model calls, agents (`Agent`), orchestration (`Orchestrator`, LangGraph), DB schema/migrations, Redis caching |
-| 4 | RAG — `Retriever`/`VectorStore`, LlamaIndex ingest, Qdrant queries (`qdrant-client`) |
-| 5 | OpenTelemetry export, Grafana dashboards, alerting (`@traced` logs only today) |
-| 6 | Evaluation (`Evaluator`), MLOps pipelines |
-| 7 | Kubernetes manifests, Terraform |
-| 8 | Auth (`AuthProvider`), guardrails, rate limiting — **API is unauthenticated** |
-| 9 | Load/chaos testing, SLOs, pool tuning, reconnect/circuit breaking |
-| 10 | Portfolio polish |
-
-Postgres/Redis/Qdrant are **connected and probed, but nothing is persisted** — no
-schema, migrations, cache reads/writes or vector ops. Qdrant is only `GET /readyz`.
+| 4 | RAG — `Retriever`/`VectorStore`, LlamaIndex, `qdrant-client`, a retrieval tool · **5** OTel export, Grafana dashboards, alerting |
+| 6 | Evaluation (`Evaluator`), MLOps pipelines · **7** K8s manifests, Terraform · **8** Auth, guardrails, rate limiting — **API is unauthenticated** |
+| 9 | Load/chaos testing, SLOs, pool tuning, circuit breaking, prompt caching, context compaction · **10** Portfolio polish |
 
 ## Known issues
 
-- Starlette 1.3.1 deprecates `httpx` for `TestClient` in favour of `httpx2` —
-  emits a warning; harmless. Migrate when TestClient requires it.
-- `config/environments/*.env` can drift from `.env.example`; nothing enforces it.
-- A datastore whose `connect` fails at boot stays `unavailable` until restart (no
-  reconnect). One that connects and *later* blips does recover — the driver pools
-  reconnect on the next ping.
-- The 422 envelope stringifies Pydantic's raw error list into `message`.
+- Starlette 1.3.1 deprecates `httpx` for `TestClient` (warning only). 422
+  stringifies Pydantic's raw error list into `message`. `config/environments/*.env`
+  can drift from `.env.example`; nothing enforces it. A datastore whose `connect`
+  fails at boot stays `unavailable` until restart; a *later* blip recovers.
+- **`/ready` does not check schema version** — a failed migration leaves the
+  service reporting ready while every chat query fails (ADR 0007).
+- **No per-conversation concurrency control** — two concurrent turns on one
+  `conversation_id` collide on `(conversation_id, position)`; the second fails
+  loudly rather than serialising (ADR 0008).
+- **The hermetic suite cannot catch a wrong assumption about the real Anthropic
+  API** — the fake encodes our beliefs. Make a real call when changing `llm.py`
+  (ADR 0009).

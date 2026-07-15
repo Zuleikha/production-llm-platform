@@ -1,9 +1,11 @@
 """Tests for the chat/completion endpoints, validation, and SSE streaming.
 
-No real model is called in this stage — the endpoint is backed by a deterministic
-echo engine (Stage 3 swaps in the orchestrator). These tests therefore pin the
-*contract and the plumbing*: schema validation, the error envelope, the response
-shape, and the SSE wire format.
+From Stage 3 the endpoint runs the real LangGraph agent loop — the same graph,
+orchestrator, tool dispatch and token accounting production uses. The only
+substitution is the Anthropic client itself, which the ``test`` profile replaces
+with a scripted double it *cannot* opt out of (ADR 0009). So these tests pin the
+contract and the plumbing — schema validation, the error envelope, the response
+shape, the SSE wire format — against real machinery rather than a mock engine.
 """
 
 from __future__ import annotations
@@ -13,8 +15,25 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from services.api.app import create_app
+from services.api.completions import OrchestratorEngine
+from services.orchestrator.base import AgentOrchestrator
+from services.orchestrator.conversations import NullConversationStore
+from services.orchestrator.graph import AgentGraph
+from services.orchestrator.llm import AssistantTurn, ScriptedLLMClient, TokenUsage
 
 _ENDPOINT = "/v1/chat/completions"
+
+
+def _client_with_turns(settings: Any, *turns: AssistantTurn) -> TestClient:
+    """A TestClient whose agent replays exactly ``turns``.
+
+    Everything below the Anthropic client is real: the graph, the tool registry,
+    the orchestrator and the route.
+    """
+    graph = AgentGraph(ScriptedLLMClient(turns))
+    engine = OrchestratorEngine(AgentOrchestrator(graph, NullConversationStore()))
+    return TestClient(create_app(settings, engine=engine), raise_server_exceptions=False)
 
 
 def _messages() -> list[dict[str, str]]:
@@ -71,18 +90,102 @@ def test_chat_completion_echoes_the_last_user_message(client: TestClient) -> Non
     assert "first" not in content
 
 
-def test_max_tokens_truncates_and_reports_length_finish_reason(client: TestClient) -> None:
+def test_finish_reason_is_length_when_the_model_hits_the_token_cap(settings: Any) -> None:
+    """`length` means the *model* stopped at max_tokens — not that we truncated.
+
+    Stage 2 asserted the opposite: its mock chopped the reply to `max_tokens`
+    whitespace words and called that `length`. That behaviour was an artefact of
+    the mock's invented token counting and is gone. Now `max_tokens` is passed to
+    the API and the model reports whether it hit the cap, so this test pins the
+    stop_reason -> finish_reason mapping that replaced it. See ADR 0006.
+    """
+    client = _client_with_turns(
+        settings,
+        AssistantTurn(
+            text="one two",
+            usage=TokenUsage(input_tokens=11, output_tokens=2),
+            stop_reason="max_tokens",
+        ),
+    )
+
     resp = client.post(
         _ENDPOINT,
-        json={
-            "messages": [{"role": "user", "content": "one two three four five"}],
-            "max_tokens": 2,
-        },
+        json={"messages": [{"role": "user", "content": "count to a hundred"}], "max_tokens": 2},
     )
 
     body = resp.json()
     assert body["choices"][0]["finish_reason"] == "length"
     assert body["usage"]["completion_tokens"] == 2
+
+
+def test_max_tokens_is_forwarded_to_the_model(settings: Any) -> None:
+    """The cap is the API's job now, so it has to actually reach the API."""
+    llm = ScriptedLLMClient([AssistantTurn(text="hi", stop_reason="end_turn")])
+    engine = OrchestratorEngine(AgentOrchestrator(AgentGraph(llm), NullConversationStore()))
+
+    with TestClient(create_app(settings, engine=engine)) as client:
+        client.post(_ENDPOINT, json={"messages": _messages(), "max_tokens": 77})
+
+    assert llm.calls[0]["max_tokens"] == 77
+
+
+def test_max_tokens_defaults_when_the_request_omits_it(settings: Any) -> None:
+    """Anthropic requires max_tokens on every call, so a default must exist."""
+    llm = ScriptedLLMClient([AssistantTurn(text="hi", stop_reason="end_turn")])
+    engine = OrchestratorEngine(
+        AgentOrchestrator(AgentGraph(llm, max_tokens=512), NullConversationStore())
+    )
+
+    with TestClient(create_app(settings, engine=engine)) as client:
+        client.post(_ENDPOINT, json={"messages": _messages()})
+
+    assert llm.calls[0]["max_tokens"] == 512
+
+
+def test_usage_reports_the_models_own_counts_not_a_word_count(settings: Any) -> None:
+    """The whole point of the stage: usage comes from the backend, not from us."""
+    client = _client_with_turns(
+        settings,
+        AssistantTurn(
+            # Two words, but the model says otherwise — and the model wins.
+            text="short answer",
+            usage=TokenUsage(input_tokens=1234, output_tokens=57),
+            stop_reason="end_turn",
+        ),
+    )
+
+    usage = client.post(_ENDPOINT, json={"messages": _messages()}).json()["usage"]
+
+    assert usage == {"prompt_tokens": 1234, "completion_tokens": 57, "total_tokens": 1291}
+
+
+def test_usage_sums_every_model_call_in_a_tool_using_run(settings: Any) -> None:
+    """An agent run spans several model calls and the caller pays for all of them."""
+    client = _client_with_turns(
+        settings,
+        AssistantTurn(
+            tool_calls=(),
+            usage=TokenUsage(input_tokens=100, output_tokens=10),
+            stop_reason="tool_use",
+            raw_content=(
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "calculator",
+                    "input": {"expression": "2+2"},
+                },
+            ),
+        ),
+        AssistantTurn(
+            text="4",
+            usage=TokenUsage(input_tokens=200, output_tokens=20),
+            stop_reason="end_turn",
+        ),
+    )
+
+    usage = client.post(_ENDPOINT, json={"messages": _messages()}).json()["usage"]
+
+    assert usage == {"prompt_tokens": 300, "completion_tokens": 30, "total_tokens": 330}
 
 
 @pytest.mark.parametrize(

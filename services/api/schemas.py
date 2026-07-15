@@ -27,14 +27,37 @@ class ChatCompletionRequest(BaseModel):
     """A chat completion request."""
 
     messages: list[ChatMessage] = Field(min_length=1)
-    model: str = "mock-echo"
+    model: str = "agent"
     stream: bool = False
     max_tokens: int | None = Field(default=None, gt=0)
-    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    temperature: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=2.0,
+        description=(
+            "Accepted for wire compatibility but NOT forwarded to the model: the "
+            "Claude 4.7+ family removed sampling parameters and rejects them with "
+            "a 400. See ADR 0006."
+        ),
+    )
+    conversation_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description=(
+            "Optional. When set, prior turns of this conversation are loaded from "
+            "the server and this turn is persisted. When omitted the request is "
+            "stateless and the client owns the history, as in Stage 2."
+        ),
+    )
 
 
 class Usage(BaseModel):
-    """Token accounting. Counts are mocked in this stage — see ADR 0004."""
+    """Token accounting.
+
+    Real counts reported by the model backend from Stage 3 — summed across every
+    model call an agent run made, not just the last one. See ADR 0006.
+    """
 
     prompt_tokens: int
     completion_tokens: int

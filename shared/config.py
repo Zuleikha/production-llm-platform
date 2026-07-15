@@ -71,30 +71,58 @@ class Settings(BaseSettings):
     # Bounds how long /ready can block on a hung datastore.
     datastore_probe_timeout_seconds: float = Field(default=2.0, gt=0)
 
+    # --- Anthropic / agent loop (Stage 3, ADR 0006) ---
+    # The key comes from the OS environment ONLY and is never written to a
+    # committed file. Under `prod` it is mandatory — see the validator below.
+    # Under `test` it is ignored entirely: the test profile cannot construct a
+    # real Anthropic client at all (ADR 0009).
+    anthropic_api_key: str | None = None
+    anthropic_model: str = "claude-opus-4-8"
+    # The Anthropic API requires max_tokens on every request; a chat request that
+    # omits it falls back to this.
+    anthropic_max_tokens: int = Field(default=4096, gt=0)
+    anthropic_timeout_seconds: float = Field(default=60.0, gt=0)
+    # Bounds the reason -> act -> observe loop so a model that keeps calling
+    # tools cannot spin forever. Counts model calls, not tool calls.
+    agent_max_steps: int = Field(default=6, ge=1)
+
+    # --- Conversation cache (Stage 3, ADR 0008) ---
+    conversation_cache_ttl_seconds: int = Field(default=300, gt=0)
+
     @property
     def is_production(self) -> bool:
         """True when running under the ``prod`` profile."""
         return self.environment == "prod"
 
+    @property
+    def is_test(self) -> bool:
+        """True when running under the ``test`` profile.
+
+        Load-bearing, not a convenience: this is what the Anthropic client
+        constructor checks to make the suite hermetic by construction. See
+        ADR 0009.
+        """
+        return self.environment == "test"
+
     @model_validator(mode="after")
-    def _require_datastore_urls_in_prod(self) -> Settings:
-        """Fail loudly at boot if production is missing a datastore URL.
+    def _require_secrets_and_urls_in_prod(self) -> Settings:
+        """Fail loudly at boot if production is missing a required setting.
 
         Without this, a missing or typo'd ``DATABASE_URL`` in production would
         read as ``not_configured``, and ``/ready`` would return 200 for a
         service that has no database — a silent pass that violates fail-loud.
-        Dev and test are exempt: the test profile deliberately sets no URLs.
+        Stage 3 extends the same rule to ``ANTHROPIC_API_KEY``: a prod service
+        whose every chat request 401s is not a service, and the honest place to
+        say so is at boot, naming the variable. Dev and test are exempt — the
+        test profile deliberately sets neither.
         """
         if not self.is_production:
             return self
-        missing = [
-            name for name in ("database_url", "redis_url", "qdrant_url") if not getattr(self, name)
-        ]
+        required = ("database_url", "redis_url", "qdrant_url", "anthropic_api_key")
+        missing = [name for name in required if not getattr(self, name)]
         if missing:
-            required = ", ".join(name.upper() for name in missing)
-            raise ValueError(
-                f"the prod profile requires these datastore URLs to be set: {required}"
-            )
+            names = ", ".join(name.upper() for name in missing)
+            raise ValueError(f"the prod profile requires these settings to be set: {names}")
         return self
 
 

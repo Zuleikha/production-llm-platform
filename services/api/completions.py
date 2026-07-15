@@ -1,35 +1,49 @@
 """The completion engine seam.
 
 This is the **call boundary** between the HTTP layer and whatever actually
-produces an answer. Stage 2 ships one implementation, :class:`EchoEngine`, which
-returns a deterministic mock; Stage 3 adds an orchestrator-backed engine
-(LangGraph) behind the same protocol, so the routes never change.
+produces an answer. Stage 2 shipped one implementation, ``EchoEngine``, backed by
+no model at all; Stage 3 replaces it with :class:`OrchestratorEngine`, which runs
+the real LangGraph agent loop against the Anthropic API. The protocol is what
+made that swap possible without redesigning the endpoint.
 
-Keeping the seam here — rather than calling ``services.orchestrator`` directly —
-is what lets Stage 2 prove the endpoint, the schemas and the streaming plumbing
-against a mock, while the orchestrator stays the untouched stub it should be
-until Stage 3.
+The protocol changed in one way this stage, and it is the point of the stage:
+:class:`Completion` now carries **real** token counts from the model backend.
+Stage 2 had the *route* approximate usage by splitting the reply on whitespace,
+which meant the numbers were invented at the wrong layer and could never match a
+bill. Only the engine knows what a turn actually cost — an agent run spans
+several model calls the route cannot see — so usage is reported by the engine and
+the route reads it. See ADR 0006.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from shared.observability import traced
 
+from services.orchestrator.conversations import Turn
+from services.orchestrator.llm import TokenUsage
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
-    from services.api.schemas import ChatMessage
+    from services.api.schemas import ChatMessage, FinishReason
+    from services.orchestrator.base import AgentOrchestrator
 
 
-def count_tokens(text: str) -> int:
-    """Approximate a token count by whitespace-splitting.
+@dataclass(frozen=True, slots=True)
+class Completion:
+    """A finished reply and what it cost."""
 
-    A stand-in, not a tokenizer: Stage 3 reports real counts from the model
-    backend. Good enough to prove the ``usage`` contract.
-    """
-    return len(text.split())
+    text: str
+    usage: TokenUsage
+    finish_reason: FinishReason
+
+
+# A stream is many text pieces followed by exactly one Completion. Expressed as a
+# union rather than two methods so a caller cannot forget to collect the usage.
+StreamEvent = str | Completion
 
 
 @runtime_checkable
@@ -41,54 +55,98 @@ class CompletionEngine(Protocol):
     signatures — mypy covers the rest statically.
     """
 
-    async def complete(self, messages: Sequence[ChatMessage], *, max_tokens: int | None) -> str:
-        """Return the full reply text."""
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        max_tokens: int | None,
+        conversation_id: str | None = None,
+    ) -> Completion:
+        """Return the whole reply."""
         ...
 
     def stream(
-        self, messages: Sequence[ChatMessage], *, max_tokens: int | None
-    ) -> AsyncIterator[str]:
-        """Yield the reply in incremental pieces.
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        max_tokens: int | None,
+        conversation_id: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Yield the reply in pieces, then one final :class:`Completion`.
 
-        Concatenating every piece must equal ``complete``'s return value for the
-        same input — the transport must not change the answer.
+        Concatenating every text piece must equal the final ``Completion.text``
+        — the transport must not change the answer.
         """
         ...
 
 
-class EchoEngine:
-    """A deterministic mock engine: echoes the most recent user turn.
+def _finish_reason(stop_reason: str | None) -> FinishReason:
+    """Map the model's stop reason onto the OpenAI-shaped wire value.
 
-    No model is called. This exists so the endpoint contract, validation and SSE
-    framing are real and testable before Stage 3 wires in a model.
+    The wire format only has ``stop`` and ``length``; ``max_tokens`` is the one
+    that means the reply was cut short. Everything else — including a tool_use
+    stop that survived the agent loop's step cap — is a completed turn from the
+    client's point of view.
+    """
+    return "length" if stop_reason == "max_tokens" else "stop"
+
+
+class OrchestratorEngine:
+    """The real engine: a LangGraph agent loop behind the Stage 2 protocol.
+
+    Deliberately thin. It exists to translate between the API's vocabulary
+    (``ChatMessage``, ``finish_reason``) and the orchestrator's (``Turn``,
+    ``stop_reason``), and does no reasoning of its own — every decision worth
+    testing lives in the graph.
+
+    This translation is the whole reason the orchestrator does not import the
+    API's schemas: the dependency runs api -> orchestrator, and converting here
+    is what keeps it that way.
     """
 
-    _PREFIX = "You said: "
+    def __init__(self, orchestrator: AgentOrchestrator) -> None:
+        self._orchestrator = orchestrator
+
+    @staticmethod
+    def _turns(messages: Sequence[ChatMessage]) -> list[Turn]:
+        return [Turn(role=m.role, content=m.content) for m in messages]
 
     @traced
-    def _reply_tokens(self, messages: Sequence[ChatMessage], max_tokens: int | None) -> list[str]:
-        last_user = next(
-            (m.content for m in reversed(messages) if m.role == "user"),
-            "",
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        max_tokens: int | None,
+        conversation_id: str | None = None,
+    ) -> Completion:
+        result = await self._orchestrator.answer(
+            self._turns(messages), conversation_id=conversation_id, max_tokens=max_tokens
         )
-        tokens = f"{self._PREFIX}{last_user}".split()
-        if max_tokens is not None:
-            tokens = tokens[:max_tokens]
-        return tokens
-
-    @traced
-    async def complete(self, messages: Sequence[ChatMessage], *, max_tokens: int | None) -> str:
-        return " ".join(self._reply_tokens(messages, max_tokens))
+        return Completion(
+            text=result.answer,
+            usage=result.usage,
+            finish_reason=_finish_reason(result.stop_reason),
+        )
 
     async def stream(
-        self, messages: Sequence[ChatMessage], *, max_tokens: int | None
-    ) -> AsyncIterator[str]:
-        """Yield one whitespace-delimited token at a time.
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        max_tokens: int | None,
+        conversation_id: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream the reply.
 
-        Not decorated with ``@traced``: async generators are exempt (see
-        CLAUDE.md), and the per-token spans would be noise regardless.
+        Not decorated with ``@traced``: async generators are exempt (CLAUDE.md).
         """
-        for index, token in enumerate(self._reply_tokens(messages, max_tokens)):
-            # Re-attach the separator the split() above removed, so the client's
-            # concatenation reproduces `complete` exactly.
-            yield token if index == 0 else f" {token}"
+        async for item in self._orchestrator.answer_stream(
+            self._turns(messages), conversation_id=conversation_id, max_tokens=max_tokens
+        ):
+            if isinstance(item, str):
+                yield item
+            else:
+                yield Completion(
+                    text=item.answer,
+                    usage=item.usage,
+                    finish_reason=_finish_reason(item.stop_reason),
+                )
