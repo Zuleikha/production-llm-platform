@@ -165,23 +165,72 @@ jobs:
           curl -fsS http://localhost:8000/version | tee /dev/stderr | grep -q '"service":"api"'
           curl -fsS http://localhost:8000/metrics | grep -q 'http_requests_total'
 
+      # Chat is verified on a SECOND container running the `test` profile, not on
+      # the prod one above.
+      #
+      # Since Stage 3 the chat endpoint really calls Anthropic, so the prod
+      # container cannot answer it without a real key — and CI must never need
+      # one (ADR 0009: no CI run may spend money). The `test` profile cannot
+      # construct a real Anthropic client at all; it gets the scripted double, so
+      # the whole HTTP surface — route, schemas, engine seam, SSE framing, the
+      # [DONE] sentinel — is exercised through a real container over real HTTP
+      # with no key and no cost. That is the Stage 2 coverage, preserved.
+      #
+      # What this deliberately does NOT prove is that a real model call works.
+      # Nothing in CI can: see the stage summary's "no contract test" limitation.
+      #
+      # No datastores and no --network host: the test profile sets no URLs, so
+      # this container persists nothing (NullConversationStore) and only needs a
+      # port. 8001 because the prod container already holds 8000 on the host.
+      - name: Run test-profile container (chat, no API key)
+        run: |
+          docker run -d --name api-ci-test -p 8001:8000 \
+            -e ENVIRONMENT=test \
+            production-llm-platform/api:ci
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8001/health || true)
+            if [ "$code" = "200" ]; then echo "test-profile container ready after ${i}s"; exit 0; fi
+            sleep 1
+          done
+          echo "::error::test-profile container did not become ready within 30s"
+          docker logs api-ci-test
+          exit 1
+
       - name: Verify chat completion and SSE streaming
         run: |
           set -euo pipefail
-          curl -fsS http://localhost:8000/v1/chat/completions \
+          curl -fsS http://localhost:8001/v1/chat/completions \
             -H 'Content-Type: application/json' \
             -d '{"messages":[{"role":"user","content":"ping"}]}' \
             | tee /dev/stderr | grep -q '"object":"chat.completion"'
-          stream=$(curl -fsS -N http://localhost:8000/v1/chat/completions \
+          stream=$(curl -fsS -N http://localhost:8001/v1/chat/completions \
             -H 'Content-Type: application/json' \
             -d '{"messages":[{"role":"user","content":"ping"}],"stream":true}' | tee /dev/stderr)
           echo "$stream" | grep -q '"object":"chat.completion.chunk"'
           echo "$stream" | grep -q 'data: \[DONE\]'
 
+      # The prod container must REFUSE chat rather than pretend: its key is a
+      # dummy, so a real call 401s. Assert it fails in the uniform error envelope
+      # and does not leak internals — the thing that would actually be a defect.
+      - name: Verify prod-profile chat fails cleanly with a bad key
+        run: |
+          set -euo pipefail
+          body=$(curl -s -o - -w '\n%{http_code}' http://localhost:8000/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -d '{"messages":[{"role":"user","content":"ping"}]}' | tee /dev/stderr)
+          echo "$body" | tail -1 | grep -qE '^5[0-9][0-9]$'
+          echo "$body" | grep -q '"error"'
+          # `!` + `grep -q`, NOT `grep -qv`: -v succeeds whenever ANY line lacks
+          # the string, so it would pass even if the key leaked on another line.
+          ! echo "$body" | grep -q 'sk-ant'
+          ! echo "$body" | grep -qi 'traceback\|anthropic'
+
       - name: Container logs (always)
         if: always()
-        run: docker logs api-ci || true
+        run: |
+          docker logs api-ci || true
+          docker logs api-ci-test || true
 
       - name: Tear down
         if: always()
-        run: docker rm -f api-ci || true
+        run: docker rm -f api-ci api-ci-test || true
