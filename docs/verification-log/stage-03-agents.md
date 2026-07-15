@@ -26,6 +26,49 @@ left implicit:
 Everything else — all source, tests, ADRs and the five gates checked above — is
 unchanged between the verified tree and `20eb977`.
 
+## Post-verification: CI was NOT green on the verified commit
+
+Recorded after the fact. **`20eb977` — the commit this log verifies — does not
+pass CI.** Master needed two further commits to go green, and a reader would
+otherwise reasonably assume the verified commit was CI-clean. It was not.
+
+| Run | Commit | Result | Cause |
+|---|---|---|---|
+| 29429824794 | `14a64a1` | **failure** | Container refused to boot: `ValidationError … the prod profile requires these settings to be set: ANTHROPIC_API_KEY`. `/health` never answered. |
+| 29430537676 | `af13ab1` | **failure** | Container booted and `/health`, `/ready` (all three stores `ok`), `/version`, `/metrics` passed — but chat returned **500**. |
+| 29441337589 | `fab3170` | **success** | Both jobs green. |
+
+`20eb977` was never built by CI on its own: the push carried `20eb977` and
+`14a64a1` together, so the run tested the tip. Every commit of Stage 3's code up
+to `af13ab1` is therefore CI-red.
+
+**Neither failure was a defect in Stage 3's code.** Both were CI catching up with
+it, and both were invisible to the verification above for the same reason that
+section already flags — *the api container was never booted*:
+
+1. **`af13ab1`** — the Docker job boots the image as `ENVIRONMENT=prod` so
+   `/ready` does genuine probes (ADR 0005). Stage 3 extended that prod-boot
+   refusal to require `ANTHROPIC_API_KEY` (ADR 0006), and the job was never told.
+   The validator is correct and unchanged; the job now passes an ephemeral dummy
+   key, matching the pattern it already used for postgres.
+2. **`fab3170`** — with the container booting, the Stage 2-era "verify chat + SSE"
+   step then failed: it assumed the mock `EchoEngine`, but Stage 3 chat really
+   calls Anthropic, so the dummy key 401s and the endpoint correctly returns 500.
+   Chat is now verified on a **second container running the `test` profile**,
+   which cannot construct a real Anthropic client at all (ADR 0009) — full HTTP
+   surface, no key, no spend. The prod container additionally asserts chat fails
+   in the uniform error envelope without leaking the key or a traceback.
+
+This is the strongest evidence this stage produced for a gap the self-report
+disclosed and this log accepted as a deferral: **booting the container was not
+optional coverage — it hid two failures.** Worth treating "the api container was
+never booted" as blocking rather than deferrable in future stages.
+
+Still not covered by CI, unchanged: **no contract test against the real Anthropic
+API.** CI proves the HTTP surface and never makes a model call, so a provider-side
+field rename would not be caught. Only the two live calls in the self-report
+(~$0.021) ever exercised that path.
+
 ## Result: PASS
 
 All checklist items verified. No discrepancy found between the self-report
@@ -128,11 +171,13 @@ and pass with real dependencies).
 
 ## Non-blocking / known gaps (disclosed by Claude Code, not found during verification)
 
-- The `api` container was never built or booted this stage — the chat
-  endpoint has been exercised only in-process via tests, never end-to-end
-  through a running container with real HTTP + curl. Deferred to before or
-  shortly after commit, at zulu's discretion.
-- CI was not run this stage (no push yet — commit hasn't happened).
+- ~~The `api` container was never built or booted this stage~~ — **closed after
+  verification, and it was not a benign gap.** The container was booted (locally
+  and in CI) after this log was signed off, and it exposed two failures that
+  every in-process test missed. See "Post-verification: CI" above.
+- ~~CI was not run this stage (no push yet — commit hasn't happened).~~ — **run
+  after this log was written: red on the verified commit, green only at
+  `fab3170`.** See "Post-verification: CI" above.
 - `verify.ps1` was not run.
 - The `prod` profile was never started or tested this stage.
 - The two real Anthropic API calls (~$0.021 total, referenced in the
@@ -156,3 +201,20 @@ full pytest, architecture drift check) matched exactly. One anomaly (uv's
 real defect was found this stage. Remaining gaps (API container not
 booted, CI not run) are honestly disclosed deferrals, not concealed
 shortcuts. Clear to commit.
+
+**Amended after commit.** The sign-off above stands on its own terms — it was
+accurate for what was checked, and no defect in Stage 3's code has since
+emerged. But its last-but-one sentence has not aged well: the two gaps it waved
+through as "honestly disclosed deferrals" turned out to be the only two things
+that could still fail, and both did. CI was red on `20eb977` (the commit this log
+verifies) and stayed red through `af13ab1`, going green only at `fab3170`. See
+"Post-verification: CI" above.
+
+The lesson is not that the disclosure was dishonest — it was exactly right, and
+it named the gap that bit. The lesson is that *"disclosed"* is not the same as
+*"acceptable"*: booting the container was the one piece of coverage that
+in-process tests structurally cannot substitute for, and signing off without it
+meant signing off on a commit that does not build. In future stages, treat
+"the api container was never booted" as blocking rather than deferrable.
+
+**Current state:** master at `fab3170`, CI green (both jobs), tree clean.
