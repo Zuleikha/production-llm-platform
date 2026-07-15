@@ -8,10 +8,23 @@ the summary's claims alone.
 
 **Date:** 2026-07-15
 **Stage:** 3 — Agents
-**Commit verified:** pending — verification performed against the
-uncommitted working tree, HEAD at `8bc012a` (Stage 2's final commit). To be
-filled in once CC commits, same two-step pattern as Stage 2
-(`8dc3a0d docs: record stage-2 commit hash in verification log`).
+**Commit verified:** `20eb977`
+
+Verification was performed against the uncommitted working tree (HEAD then at
+`8bc012a`, Stage 2's final commit); that tree became `20eb977`. Two deltas
+between what was verified and what was committed, recorded here rather than
+left implicit:
+
+- **`README.md` was refreshed to Stage 3 *after* this log was written** (log
+  16:27, README edits 16:33) and is therefore in `20eb977` but was **not**
+  independently verified. Docs-only: it corrects a status banner stale since
+  Stage 1, moves `langgraph`/`anthropic` into the Runtime stack row, marks
+  `agents`/`orchestrator` implemented, updates the roadmap, and fixes a wrong
+  Grafana port (3000 → 3001). No code, test, or gate change.
+- **`CHECKPOINT.md` was deleted before the commit**, as anticipated below.
+
+Everything else — all source, tests, ADRs and the five gates checked above — is
+unchanged between the verified tree and `20eb977`.
 
 ## Result: PASS
 
