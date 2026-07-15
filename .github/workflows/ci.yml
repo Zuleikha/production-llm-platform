@@ -58,8 +58,9 @@ jobs:
     runs-on: ubuntu-latest
 
     # Real datastores for the container to connect to. The image defaults to
-    # ENVIRONMENT=prod, which (from Stage 2) refuses to boot without all three
-    # URLs — so /ready in this job does genuine probes, not a stub. See ADR 0005.
+    # ENVIRONMENT=prod, which refuses to boot without all three URLs (ADR 0005)
+    # *and*, from Stage 3, without ANTHROPIC_API_KEY (ADR 0006) — so /ready in
+    # this job does genuine probes, not a stub.
     services:
       postgres:
         image: postgres:16-alpine
@@ -114,6 +115,14 @@ jobs:
       # --network host so the container reaches the service containers, which
       # are published on the runner's localhost. Credentials here are ephemeral
       # CI-only values, never production secrets.
+      #
+      # ANTHROPIC_API_KEY is a deliberate dummy. Since Stage 3 the prod profile
+      # refuses to boot without it (ADR 0006), and this job's whole point is that
+      # a prod-configured container boots and serves /health. Nothing here calls
+      # Anthropic — /health touches no dependency at all and /ready probes only
+      # the three datastores — so a placeholder satisfies the boot check without
+      # CI ever needing a real key or spending a cent. If a step is ever added
+      # that does make a model call, this value must not be what backs it.
       - name: Run container
         run: |
           docker run -d --name api-ci --network host \
@@ -121,6 +130,7 @@ jobs:
             -e DATABASE_URL=postgresql://platform:platform@localhost:5432/platform \
             -e REDIS_URL=redis://localhost:6379/0 \
             -e QDRANT_URL=http://localhost:6333 \
+            -e ANTHROPIC_API_KEY=sk-ant-ci-not-a-real-key \
             production-llm-platform/api:ci
 
       - name: Wait for /health to return 200
