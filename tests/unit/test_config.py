@@ -26,6 +26,7 @@ def test_prod_profile_switch(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("REDIS_URL", "redis://redis:6379/0")
     monkeypatch.setenv("QDRANT_URL", "http://qdrant:6333")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key")
+    monkeypatch.setenv("VOYAGE_API_KEY", "pa-not-a-real-key")
     get_settings.cache_clear()
     settings = get_settings()
     assert settings.environment == "prod"
@@ -40,17 +41,22 @@ _DB_URL = "postgresql://u:p@postgres:5432/db"
 _REDIS_URL = "redis://redis:6379/0"
 _QDRANT_URL = "http://qdrant:6333"
 _API_KEY = "sk-ant-not-a-real-key"
+_VOYAGE_KEY = "pa-not-a-real-key"
 
 
 @pytest.mark.parametrize(
-    ("missing", "database_url", "redis_url", "qdrant_url", "anthropic_api_key"),
+    ("missing", "database_url", "redis_url", "qdrant_url", "anthropic_api_key", "voyage_api_key"),
     [
-        ("DATABASE_URL", None, _REDIS_URL, _QDRANT_URL, _API_KEY),
-        ("REDIS_URL", _DB_URL, None, _QDRANT_URL, _API_KEY),
-        ("QDRANT_URL", _DB_URL, _REDIS_URL, None, _API_KEY),
+        ("DATABASE_URL", None, _REDIS_URL, _QDRANT_URL, _API_KEY, _VOYAGE_KEY),
+        ("REDIS_URL", _DB_URL, None, _QDRANT_URL, _API_KEY, _VOYAGE_KEY),
+        ("QDRANT_URL", _DB_URL, _REDIS_URL, None, _API_KEY, _VOYAGE_KEY),
         # Stage 3 extends the same rule to the model credential: a prod service
         # whose every chat request 401s should not have booted (ADR 0006).
-        ("ANTHROPIC_API_KEY", _DB_URL, _REDIS_URL, _QDRANT_URL, None),
+        ("ANTHROPIC_API_KEY", _DB_URL, _REDIS_URL, _QDRANT_URL, None, _VOYAGE_KEY),
+        # Stage 4 extends it again to the embeddings credential. Without it every
+        # retrieval 401s and the agent answers ungrounded — which looks like it
+        # worked, and is therefore worse than failing (ADR 0011).
+        ("VOYAGE_API_KEY", _DB_URL, _REDIS_URL, _QDRANT_URL, _API_KEY, None),
     ],
 )
 def test_prod_refuses_to_start_without_every_required_setting(
@@ -59,11 +65,13 @@ def test_prod_refuses_to_start_without_every_required_setting(
     redis_url: str | None,
     qdrant_url: str | None,
     anthropic_api_key: str | None,
+    voyage_api_key: str | None,
 ) -> None:
     """A missing prod setting must fail loudly at boot, naming the variable.
 
     Otherwise /ready would return 200 for a service with no database — or, for
-    the API key, for a service that cannot answer a single request.
+    the credentials, for a service that cannot answer a single request or cannot
+    ground a single answer.
     """
     with pytest.raises(ValueError, match=missing):
         Settings(
@@ -73,6 +81,7 @@ def test_prod_refuses_to_start_without_every_required_setting(
             redis_url=redis_url,
             qdrant_url=qdrant_url,
             anthropic_api_key=anthropic_api_key,
+            voyage_api_key=voyage_api_key,
         )
 
 

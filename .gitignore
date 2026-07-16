@@ -39,5 +39,11 @@ Thumbs.db
 
 # --- Docker / local data volumes ---
 *.pid
-data/
+# Ignore local data dirs (e.g. Docker volume mounts) but NOT the RAG corpus: it is
+# source, not a volume — read by the ingestion tests, copied into the image, and
+# required to ingest (Stage 4). `data/*` (not `data/`) so git can descend and the
+# negations below take effect; a bare `data/` would block re-inclusion entirely.
+data/*
+!data/README.md
+!data/corpus/
 docs/decisions/auto-changes.log

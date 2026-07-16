@@ -21,12 +21,18 @@ Two rules shape the design:
 from __future__ import annotations
 
 import asyncio
+import math
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Literal
 
 import asyncpg
+
+# Still a direct dependency after Stage 4 swapped Qdrant onto `qdrant-client`:
+# the pool limits below are httpx's, and `httpx` remains the transport under
+# both qdrant-client and Starlette's TestClient.
 import httpx
 import redis.asyncio as aioredis
+from qdrant_client import AsyncQdrantClient
 
 from shared.logging import get_logger
 from shared.observability import traced
@@ -175,18 +181,24 @@ class RedisDatastore(Datastore):
 
 
 class QdrantDatastore(Datastore):
-    """Qdrant, reached over its HTTP API via a pooled ``httpx.AsyncClient``.
+    """Qdrant, via ``qdrant-client``'s ``AsyncQdrantClient``.
 
-    Deliberately *not* ``qdrant-client``: that is a Stage 4 (retrieval)
-    dependency, and Stage 2 needs only a readiness probe and a pooled
-    connection. Stage 4 can swap this for the real client. See ADR 0005.
+    Stage 2 reached Qdrant with a raw pooled ``httpx.AsyncClient`` hitting
+    ``/readyz``, because a readiness probe was all it needed and ``qdrant-client``
+    was a Stage 4 dependency (ADR 0005). Stage 4 makes the swap ADR 0005
+    anticipated: the collection now holds vectors, and hand-rolling
+    search/upsert over raw HTTP would be reimplementing the client badly.
+
+    The probe changes with it — ``get_collections`` instead of ``/readyz``. That
+    is a slightly *stronger* check: it proves the API answers queries, not just
+    that the process is up. See ADR 0012.
     """
 
     def __init__(self, url: str | None, *, max_connections: int, timeout: float) -> None:
         self._url = url
         self._max_connections = max_connections
         self._timeout = timeout
-        self._client: httpx.AsyncClient | None = None
+        self._client: AsyncQdrantClient | None = None
 
     @property
     def name(self) -> str:
@@ -196,38 +208,52 @@ class QdrantDatastore(Datastore):
     def configured(self) -> bool:
         return self._url is not None
 
+    @property
+    def client(self) -> AsyncQdrantClient | None:
+        """The live client, or None when unconfigured or not yet connected.
+
+        Exposed for Stage 4's vector store. See `PostgresDatastore.pool` for why
+        this returns None rather than raising.
+        """
+        return self._client
+
     @traced
     async def connect(self) -> None:
         if self._url is None:  # pragma: no cover - registry never connects these
             return
-        client = httpx.AsyncClient(
-            base_url=self._url,
-            timeout=self._timeout,
+        client = AsyncQdrantClient(
+            url=self._url,
+            # AsyncQdrantClient's own timeout is typed `int | None`, unlike the
+            # float the other stores take; a sub-second timeout would truncate
+            # to 0 and mean "no timeout", so round up rather than down.
+            timeout=max(1, math.ceil(self._timeout)),
+            # Forwarded to the httpx client underneath. Not in the constructor's
+            # signature — it arrives via **kwargs — so it is pinned by a test
+            # rather than by the type checker (see test_datastores.py).
             limits=httpx.Limits(max_connections=self._max_connections),
         )
         try:
-            await self._readyz(client)
+            await self._probe(client)
         except Exception:
-            await client.aclose()
+            await client.close()
             raise
         self._client = client
 
     @traced
     async def close(self) -> None:
         if self._client is not None:
-            await self._client.aclose()
+            await self._client.close()
             self._client = None
 
     @traced
     async def ping(self) -> None:
         if self._client is None:
             raise RuntimeError("qdrant is not connected")
-        await self._readyz(self._client)
+        await self._probe(self._client)
 
     @staticmethod
-    async def _readyz(client: httpx.AsyncClient) -> None:
-        response = await client.get("/readyz")
-        response.raise_for_status()
+    async def _probe(client: AsyncQdrantClient) -> None:
+        await client.get_collections()
 
 
 class DatastoreRegistry:
@@ -282,6 +308,15 @@ class DatastoreRegistry:
         """The Redis client, if Redis is configured and connected."""
         store = self.get("redis")
         return store.client if isinstance(store, RedisDatastore) else None
+
+    @property
+    def qdrant_client(self) -> AsyncQdrantClient | None:
+        """The Qdrant client, if Qdrant is configured and connected.
+
+        Exposed for Stage 4's vector store, which needs to issue real searches.
+        """
+        store = self.get("qdrant")
+        return store.client if isinstance(store, QdrantDatastore) else None
 
     @traced
     async def startup(self) -> None:

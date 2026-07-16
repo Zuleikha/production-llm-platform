@@ -11,18 +11,26 @@
 > pre-rendered to inline SVG under `docs/diagrams/` — the page has no CDN and no
 > JavaScript, and renders offline (ADR 0010).
 
-**Stage 3 of 10 (Agents).** The platform today is a FastAPI service whose chat
+**Stage 4 of 10 (RAG).** The platform today is a FastAPI service whose chat
 endpoint runs a **real LangGraph agent loop against the Anthropic API**: it
 reasons, calls tools, observes the results, and answers — persisting the
 conversation to Postgres behind a Redis read-through cache, and reporting the
 model's own token counts.
 
+**Stage 4 grounds those answers in documents.** A corpus is chunked and embedded
+(Voyage AI) into **Qdrant, which now holds data**; a new `document_search` tool
+lets the agent retrieve relevant passages and answer from them, and the response
+carries **citations** back to the source chunks. This changed nothing about the
+loop's shape: retrieval is one more `Tool` in the registry, and the routes, SSE
+framing and `CompletionEngine`/`LLMClient` seams are untouched.
+
 **Stage 2's `EchoEngine` is gone.** The `CompletionEngine` protocol it sat behind
-is unchanged, which is what let the swap happen without redesigning the endpoint.
+is unchanged, which is what let the Stage 3 swap happen without redesigning the
+endpoint — and what let Stage 4 add grounding without touching it either.
 
 ---
 
-## Current state (Stage 3 — built and verified)
+## Current state (Stage 4 — built and verified)
 
 ### Component map
 
@@ -42,11 +50,11 @@ flowchart TD
         routes -->|"GET /ready"| registry
     end
 
-    subgraph agent["agent stack (Stage 3)"]
+    subgraph agent["agent stack (Stage 3–4)"]
         direction TB
-        orch["AgentOrchestrator<br/>history · usage · persistence"]
+        orch["AgentOrchestrator<br/>history · usage · persistence · citations"]
         loop["AgentGraph (LangGraph)<br/>reason ⇄ act"]
-        tools["ToolRegistry<br/>calculator · text_stats · json_query"]
+        tools["ToolRegistry<br/>calculator · text_stats · json_query<br/>+ document_search (Stage 4)"]
         llm["LLMClient<br/>AnthropicClient"]
 
         orch --> loop
@@ -54,13 +62,24 @@ flowchart TD
         loop --> llm
     end
 
+    subgraph retrieval["retrieval stack (Stage 4)"]
+        direction TB
+        retr["VectorRetriever<br/>embed query · search · score floor"]
+        emb["EmbeddingsClient<br/>VoyageEmbeddingsClient"]
+        vstore["QdrantVectorStore<br/>ensure · upsert · query"]
+
+        retr --> emb
+        retr --> vstore
+    end
+
     store["ConversationStore<br/>Redis read-through → Postgres"]
 
     pg[("postgres<br/>asyncpg pool<br/>conversations")]
     rd[("redis<br/>redis.asyncio pool<br/>history cache")]
-    qd[("qdrant<br/>httpx → /readyz<br/>no data — Stage 4")]
+    qd[("qdrant<br/>qdrant-client pool<br/>document vectors")]
 
     anthropic(["Anthropic API<br/>claude-opus-4-8"])
+    voyage(["Voyage AI API<br/>voyage-3.5-lite"])
 
     client --> mw
     engine --> orch
@@ -68,6 +87,9 @@ flowchart TD
     store --> rd
     store --> pg
     llm --> anthropic
+    tools -->|"document_search"| retr
+    emb --> voyage
+    vstore --> qd
     registry --> pg
     registry --> rd
     registry --> qd
@@ -77,19 +99,23 @@ flowchart TD
 
     classDef external fill:#ede7ff,stroke:#7b5cd6,color:#2c1a66
     classDef store fill:#e8f4ff,stroke:#4a90d9,color:#0a3d62
-    classDef unbuilt fill:#f4f4f4,stroke:#999,color:#555
-    class anthropic external
-    class pg,rd store
-    class qd unbuilt
+    class anthropic,voyage external
+    class pg,rd,qd store
 ```
+
+Ingestion (`scripts/ingest.py`) is an **offline operator action**, not part of
+the request path: it reads `data/corpus/`, chunks and embeds it, and upserts the
+vectors into Qdrant. The `api` service never ingests — it only searches what
+ingestion put there.
 
 `shared/` (`config` · `logging` · `observability` · `datastores` · `migrations` ·
 `version`) is imported throughout the service rather than sitting in the request
 path — it is left out of the diagram above to keep the flow readable.
 
-Postgres and Redis now **hold real data**: conversation history and its cache.
-Qdrant is still only reached for `GET /readyz` and holds nothing — it belongs to
-Stage 4.
+All three datastores now **hold real data**: Postgres the conversation history,
+Redis its cache, and — new in Stage 4 — Qdrant the document vectors. The Stage 2
+raw-`httpx` `/readyz` probe is gone; Qdrant is reached through `qdrant-client`,
+and its readiness probe is now `get_collections()` (ADR 0012).
 
 ### The `api` service
 
@@ -174,6 +200,11 @@ SSE framing is specified in ADR 0004 and is **unchanged** from Stage 2. What
 changed is `usage`: it now carries the model's own counts, summed across every
 model call the run made.
 
+The sequence below shows a **grounded** turn: the model calls `document_search`,
+which embeds the query with Voyage and searches Qdrant, and the run answers from
+the fenced excerpts. The citations accumulate in graph state and are surfaced on
+the response (ADR 0013).
+
 ```mermaid
 sequenceDiagram
     participant C as client
@@ -182,6 +213,8 @@ sequenceDiagram
     participant G as AgentGraph
     participant A as Anthropic API
     participant T as ToolRegistry
+    participant V as VectorRetriever
+    participant Q as Voyage + Qdrant
 
     C->>R: POST /v1/chat/completions
     Note over R: Pydantic validation<br/>≥1 message · role enum<br/>max_tokens > 0
@@ -191,28 +224,64 @@ sequenceDiagram
 
     O->>G: run(messages)
     G->>A: messages.stream(tools=[...])
-    A-->>G: tool_use: calculator("129 * 47")
+    A-->>G: tool_use: document_search("roll back?")
     G->>T: invoke
-    T-->>G: "6063"
+    T->>V: retrieve(query)
+    V->>Q: embed query · search vectors
+    Q-->>V: scored chunks
+    V-->>T: RetrievedDocuments
+    T-->>G: fenced excerpts + citations
     G->>A: messages.stream(+ tool_result)
-    A-->>G: text: "129 * 47 = 6063."
+    A-->>G: text: "Shift traffic to the previous version."
 
     O->>O: persist turn · invalidate cache
 
     alt stream = false
-        R-->>C: 200 {choices, usage: real counts}
+        R-->>C: 200 {choices, usage, citations}
     else stream = true
         R-->>C: data: {delta:{role,content}}
-        R-->>C: data: {delta:{}, finish_reason}
+        R-->>C: data: {delta:{}, finish_reason, citations}
         R-->>C: data: [DONE]
     end
 ```
+
+### Retrieval, grounding and citations (Stage 4)
+
+Retrieval is composed as one more capability the agent can call, not a new loop.
+`ToolRegistry.default()` still returns the three offline tools; the retrieval
+tool is added at wiring time (`ToolRegistry.with_tools`, from `services.api.app`)
+only when there is a live Qdrant to search. The dependency runs retrieval →
+agents, so the agent kernel knows what a tool *is*, not what retrieval talks to.
+
+| Piece | Module | Role |
+|-------|--------|------|
+| Ingestion | `services/retrieval/ingest.py` | `load_corpus` → `chunk_documents` (LlamaIndex `SentenceSplitter`) → embed → `upsert`. Offline; run by `scripts/ingest.py`. |
+| Embeddings | `services/retrieval/embeddings.py` | `VoyageEmbeddingsClient`, and the offline `HashingEmbeddingsClient` the `test` profile runs — same hermetic guard as Anthropic (ADR 0009, 0011). |
+| Vector store | `services/retrieval/store.py` | `QdrantVectorStore` on `qdrant-client`; deterministic UUIDv5 point ids make re-ingest idempotent (ADR 0012). |
+| Retriever | `services/retrieval/retriever.py` | `VectorRetriever`: embed the query, search, drop matches below a score floor so an unrelated question returns nothing rather than weak noise. |
+| Tool | `services/retrieval/tool.py` | `document_search`: the injection boundary. |
+
+**Prompt-injection boundary (ADR 0014).** This is the first tool whose result is
+not a pure function of its arguments — it returns document text that could be
+attacker-influenced. Retrieved excerpts are fenced with a **per-call random
+nonce** and labelled, next to the data, as untrusted reference material that must
+not be obeyed as instructions. The nonce is unguessable, so a document cannot
+close the fence and appear to break out into instruction context. This removes
+ambiguity about what is data; it is **not** immunity, and the residual risk is
+documented and deferred to Stage 8, which owns security.
+
+**Citations (ADR 0013).** Retrieved chunks are carried out of the tool as typed
+`Citation` data — never parsed back out of the text the model saw, so a document
+cannot forge its own provenance. They accumulate across the run (deduplicated by
+chunk id) and surface as a **new top-level `citations` field** on the response:
+on the final SSE frame when streaming, once when whole. An ungrounded answer
+reports `"citations": []` rather than omitting the field.
 
 ### `shared/` foundation
 
 | Module | Responsibility |
 |--------|----------------|
-| `config.py` | Typed `Settings` (pydantic-settings), layered profiles — see ADR 0003. `prod` refuses to boot without all three datastore URLs |
+| `config.py` | Typed `Settings` (pydantic-settings), layered profiles — see ADR 0003. `prod` refuses to boot without all three datastore URLs, `ANTHROPIC_API_KEY`, *and* `VOYAGE_API_KEY` |
 | `logging.py` | JSON formatter (`timestamp`, `level`, `service`, `environment`, `request_id`, `logger`, `message`, `exception`) + console formatter; routes uvicorn logs through one handler |
 | `observability.py` | `@traced` — logs span enter/exit/duration/error; sync + async; PEP 695 typed |
 | `datastores.py` | `Datastore` ABC + Postgres/Redis/Qdrant implementations and `DatastoreRegistry` — see ADR 0005 |
@@ -295,14 +364,18 @@ container — see CLAUDE.md).
 
 ### Quality gate
 
-ruff (lint + format) · mypy `strict` · pytest (185 tests) · pre-commit · GitHub
-Actions running the same commands, **plus** a Docker job that boots the container
-against live postgres/redis/qdrant service containers and fails unless `/ready`
-reports every store `ok` and the chat + SSE contract holds.
+ruff (lint + format) · mypy `strict` · pytest (246 tests, plus opt-in
+live-datastore, live-Qdrant and live-provider layers that skip by default) ·
+pre-commit · GitHub Actions running the same commands, **plus** a Docker job that
+boots the container against live postgres/redis/qdrant service containers and
+fails unless `/ready` reports every store `ok` and the chat + SSE contract holds.
 
 The suite is **hermetic by construction**: the `test` profile cannot construct a
-real Anthropic client at all, so no test can make a paid API call regardless of
-what is in the environment (ADR 0009). CI needs no `ANTHROPIC_API_KEY`.
+real Anthropic client *or a real Voyage client* — both refuse before their key is
+read — so no test can make a paid API call regardless of what is in the
+environment (ADR 0009, 0011). CI needs neither `ANTHROPIC_API_KEY` nor
+`VOYAGE_API_KEY`. A separate, double-opt-in contract test (ADR 0015) makes one
+real call to each provider when a human runs it deliberately.
 
 ---
 
@@ -313,24 +386,29 @@ builds it.
 
 | Component | Stage | Status today |
 |-----------|-------|--------------|
-| `services/retrieval` — `Retriever` Protocol, `VectorStore` ABC (LlamaIndex + Qdrant) | 4 | **Not implemented.** Raises. Qdrant is reached only for `GET /readyz` and holds no data. |
 | `services/monitoring` — `SpanExporter`; OpenTelemetry export, Grafana dashboards, alerts | 5 | **Not implemented.** `@traced` logs only; no OTel backend, no dashboards. |
 | `services/evaluation` — `Evaluator` ABC | 6 | **Not implemented.** Raises. |
 | `infrastructure/kubernetes`, `infrastructure/terraform` | 7 | **Empty placeholders.** Compose only today. |
 | `services/security` — `AuthProvider`, `Guardrail` | 8 | **Not implemented.** API is entirely unauthenticated. |
 | Reliability — load testing, chaos, SLOs, pool tuning, reconnect/circuit breaking | 9 | **Nothing exists.** |
 
-### Deliberate non-goals for Stage 3
+### Deliberate non-goals for Stage 4
 
-No RAG or vector search, **no authentication**, no OTel backend, no evaluation,
-no Kubernetes. Pagination conventions are still deferred — no endpoint returns a
-collection yet.
+**No authentication** (the corpus and the API are both unauthenticated — Stage 8),
+no OTel backend, no evaluation, no Kubernetes. Pagination conventions are still
+deferred — no endpoint returns a collection yet.
 
-Within the agent stack specifically, these are deliberate omissions rather than
-oversights: no prompt caching, no context compaction (a long enough conversation
-will eventually exceed the context window), no per-conversation concurrency
-control, and no retry or circuit breaking around the Anthropic call beyond the
-SDK's own defaults. Stage 9 owns the reliability of that call.
+Retrieval itself is deliberately minimal: no reranking, no hybrid (keyword +
+vector) search, no query expansion, and no automatic re-ingestion — ingestion is
+an explicit operator action. Editing a document that becomes shorter leaves its
+old tail chunks in Qdrant, since ingestion is upsert-only (ADR 0012). The
+prompt-injection mitigation is delimiting and labelling, **not** full hardening:
+no classifier, no trust tiers, no answer egress filtering (ADR 0014, Stage 8).
+
+Within the agent stack, the Stage 3 omissions still stand: no prompt caching, no
+context compaction, no per-conversation concurrency control, and no retry or
+circuit breaking around the Anthropic *or Voyage* call beyond the SDKs' defaults.
+Stage 9 owns the reliability of those calls.
 
 ---
 
@@ -338,20 +416,24 @@ SDK's own defaults. Stage 9 owns the reliability of that call.
 
 **Stable seams.** `@traced` is the tracing seam (Stage 5 makes it emit OTel spans
 without touching a single call site). `get_settings()` is the config seam.
-`CompletionEngine` is the model seam — **Stage 3 proved it**: `EchoEngine` was
-replaced by a full agent stack and the endpoint, the SSE framing and the wire
-format did not change. `LLMClient` is the new model-provider seam, and the point
-at which the test profile is made hermetic. `Datastore` is the storage seam
-(Stage 4 swaps Qdrant's HTTP probe for `qdrant-client`). Later stages fill seams;
-they do not re-cut them.
+`CompletionEngine` is the model seam — Stage 3 proved it, and **Stage 4 leaned on
+it again**: retrieval and citations were added and the endpoint, SSE framing and
+wire format still did not change shape (the wire *gained* a `citations` field but
+kept everything else). `LLMClient` is the model-provider seam, and `Tool` is the
+capability seam — retrieval slotted in as one more `Tool`, not a new loop.
+`EmbeddingsClient` is a new provider seam, hermetic by the same construction as
+`LLMClient` (ADR 0011). `Datastore` is the storage seam — **Stage 4 made good on
+its promise** and swapped Qdrant's HTTP probe for `qdrant-client` behind the
+unchanged contract. Later stages fill seams; they do not re-cut them.
 
 **Fail loud.** Invalid config fails at startup — `prod` will not boot without its
-datastore URLs *or its `ANTHROPIC_API_KEY`*. Unbuilt components raise
-`NotImplementedError`. Errors are surfaced and logged with traces, never
-swallowed. The two deliberate exceptions are both places where degrading beats
-failing: a datastore that is down at boot yields an un-ready pod rather than a
-crash loop (ADR 0005), and a Redis failure costs a cache hit rather than the
-request (ADR 0008).
+datastore URLs, its `ANTHROPIC_API_KEY`, *or its `VOYAGE_API_KEY`*. Unbuilt
+components raise `NotImplementedError`. Errors are surfaced and logged with
+traces, never swallowed. The deliberate exceptions are places where degrading
+beats failing: a datastore down at boot yields an un-ready pod rather than a
+crash loop (ADR 0005); a Redis failure costs a cache hit rather than the request
+(ADR 0008); and a retrieval below the score floor returns no sources rather than
+weak noise the agent would cite (ADR 0013).
 
 **Honest health.** `/ready` reflects reality: it dials its dependencies and says
 503 when they are down. `/health` answers only "is this process alive?".
@@ -361,11 +443,13 @@ laptop, CI and image resolve identically. `link-mode = "copy"` stops uv's
 cross-drive hardlink install from silently skipping a package.
 
 **Security posture from day one.** No secrets in git (enforced by test +
-`.gitignore`), credentials — including `ANTHROPIC_API_KEY` — from env only,
-container runs as non-root, internal error text never reaches clients. The
-calculator tool parses to an AST and walks an allow-list rather than calling
-`eval`: the model is not a trusted caller, and neither is whatever talked to it.
-**The API is still entirely unauthenticated** — that is Stage 8.
+`.gitignore`), credentials — including `ANTHROPIC_API_KEY` and `VOYAGE_API_KEY` —
+from env only, container runs as non-root, internal error text never reaches
+clients. The calculator tool parses to an AST and walks an allow-list rather than
+calling `eval`; the retrieval tool fences untrusted document text behind a
+per-call nonce (ADR 0014): the model is not a trusted caller, and neither is
+whatever talked to it or whatever it retrieved. **The API is still entirely
+unauthenticated** — that is Stage 8.
 
 ## See also
 
@@ -379,4 +463,9 @@ calculator tool parses to an AST and walks an allow-list rather than calling
 - [ADR 0008 — Conversation caching strategy](adr/0008-conversation-caching-strategy.md)
 - [ADR 0009 — Hermetic LLM testing](adr/0009-hermetic-llm-testing.md)
 - [ADR 0010 — Pre-rendered architecture diagrams](adr/0010-pre-rendered-diagrams.md)
+- [ADR 0011 — Embeddings via Voyage AI](adr/0011-embeddings-provider.md)
+- [ADR 0012 — Qdrant collection design and `qdrant-client`](adr/0012-qdrant-vector-store.md)
+- [ADR 0013 — Citation shape](adr/0013-citation-shape.md)
+- [ADR 0014 — Prompt-injection mitigation for retrieved text](adr/0014-prompt-injection-mitigation.md)
+- [ADR 0015 — Opt-in live provider contract test](adr/0015-live-provider-contract-test.md)
 - [PROJECT_STATUS.md](PROJECT_STATUS.md) — roadmap and progress

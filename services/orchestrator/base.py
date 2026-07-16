@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 from shared.logging import get_logger
 from shared.observability import traced
 
+from services.agents.tools import Citation
 from services.orchestrator.conversations import Turn
 from services.orchestrator.llm import TokenUsage
 
@@ -49,6 +50,9 @@ class AgentResult:
     answer: str
     usage: TokenUsage
     stop_reason: str | None
+    # Sources the run's tools consulted (Stage 4). Empty when the agent answered
+    # without retrieving — which is a fact worth reporting, not a gap to fill.
+    citations: tuple[Citation, ...] = ()
 
 
 class AgentOrchestrator(Orchestrator):
@@ -103,10 +107,14 @@ class AgentOrchestrator(Orchestrator):
                 "input_tokens": state["usage"].input_tokens,
                 "output_tokens": state["usage"].output_tokens,
                 "stop_reason": state["stop_reason"],
+                "citations": len(state["citations"]),
             },
         )
         return AgentResult(
-            answer=state["answer"], usage=state["usage"], stop_reason=state["stop_reason"]
+            answer=state["answer"],
+            usage=state["usage"],
+            stop_reason=state["stop_reason"],
+            citations=state["citations"],
         )
 
     async def answer_stream(
@@ -143,6 +151,7 @@ class AgentOrchestrator(Orchestrator):
                     answer="".join(answer_parts),
                     usage=item["usage"],
                     stop_reason=item["stop_reason"],
+                    citations=item["citations"],
                 )
 
         if final is None:  # pragma: no cover - the graph always emits final state

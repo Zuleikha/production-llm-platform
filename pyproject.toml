@@ -38,6 +38,23 @@ dependencies = [
     # and cost a large transitive tree. See ADR 0006.
     "anthropic==0.116.0",
     "langgraph==1.2.9",
+    # Retrieval / RAG — promoted out of the `retrieval` extra in Stage 4, when
+    # the chat endpoint started grounding answers in retrieved documents and
+    # ingestion started putting data in Qdrant (ADR 0011/0012).
+    #
+    # `llama-index-core`, NOT the `llama-index` meta-package: the meta-package
+    # depends on llama-index-llms-openai and llama-index-embeddings-openai, so
+    # promoting it would install a rival vendor's SDK into the base image to run
+    # an Anthropic + Voyage stack. Only the ingestion primitives are used
+    # (Document, SentenceSplitter), and those live in core. Same call, and the
+    # same reasoning, as dropping `langchain` in Stage 3 — see ADR 0011.
+    "llama-index-core==0.14.23",
+    # Embeddings. Anthropic ships no embeddings API; Voyage is the documented
+    # pairing for Claude RAG workloads (ADR 0011).
+    "voyageai==0.5.0",
+    # Qdrant's own client, replacing Stage 2's raw-httpx /readyz probe now that
+    # the collection actually holds vectors (ADR 0012).
+    "qdrant-client==1.18.0",
 ]
 
 [project.optional-dependencies]
@@ -46,11 +63,9 @@ dependencies = [
 # `langgraph` and `anthropic` are now base dependencies — the API runs the agent
 # loop on every chat request and they are no longer optional. `langchain` was
 # dropped entirely rather than promoted (ADR 0006).
-# Stage 4 (RAG / retrieval).
-retrieval = [
-    "llama-index==0.14.23",
-    "qdrant-client==1.18.0",
-]
+# NOTE: the `retrieval` extra (llama-index, qdrant-client) was removed in Stage 4
+# — retrieval is now a base concern. See the base dependencies above for why
+# `llama-index-core` was promoted in place of the `llama-index` meta-package.
 # Stage 5 (observability backends: OTel export, collector).
 observability = [
     "opentelemetry-api==1.43.0",
@@ -143,6 +158,17 @@ mypy_path = "scripts"
 # asyncpg ships no py.typed marker (as of 0.31.0); redis and httpx do.
 module = ["prometheus_client.*", "asyncpg.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# voyageai DOES ship py.typed, but its __init__ re-exports implicitly
+# (`from voyageai.client_async import AsyncClient`, no __all__, no `as` alias).
+# Our `no_implicit_reexport = true` therefore rejects the documented public
+# path `voyageai.AsyncClient`. Scoped to voyageai's own modules: it relaxes how
+# mypy reads THAT package, not how it checks ours. The alternative — importing
+# `voyageai.client_async.AsyncClient` — would bind us to an internal module path
+# to work around someone else's packaging.
+module = ["voyageai.*"]
+implicit_reexport = true
 
 # ---------------------------------------------------------------------------
 # pytest

@@ -30,6 +30,7 @@ from services.api.schemas import (
     ChatMessage,
     Choice,
     ChunkChoice,
+    CitationModel,
     Delta,
     Usage,
 )
@@ -68,6 +69,20 @@ def _usage(completion: Completion) -> Usage:
         completion_tokens=completion.usage.output_tokens,
         total_tokens=completion.usage.input_tokens + completion.usage.output_tokens,
     )
+
+
+def _citations(completion: Completion) -> list[CitationModel]:
+    """Render the engine's citations into the wire format (ADR 0013)."""
+    return [
+        CitationModel(
+            id=citation.id,
+            document_id=citation.document_id,
+            source=citation.source,
+            score=citation.score,
+            text=citation.text,
+        )
+        for citation in completion.citations
+    ]
 
 
 def _sse(payload: str) -> str:
@@ -123,6 +138,7 @@ async def _whole_completion(
             )
         ],
         usage=_usage(completion),
+        citations=_citations(completion),
     )
 
 
@@ -141,15 +157,23 @@ async def _stream_completion(
     completion_id = _completion_id()
     created = int(time.time())
 
-    def chunk(delta: Delta, finish_reason: str | None = None) -> str:
+    def chunk(
+        delta: Delta,
+        finish_reason: str | None = None,
+        citations: list[CitationModel] | None = None,
+    ) -> str:
         frame = ChatCompletionChunk(
             id=completion_id,
             created=created,
             model=payload.model,
             choices=[ChunkChoice(delta=delta, finish_reason=finish_reason)],
+            citations=citations,
         )
         # exclude_none matches the OpenAI wire format: unset delta fields are
         # omitted rather than sent as null, so the final chunk is `"delta":{}`.
+        # It is also what keeps `citations` off every frame but the last: text
+        # frames pass None (omitted), the final frame passes a list (kept, even
+        # when empty — see ADR 0013).
         return _sse(frame.model_dump_json(exclude_none=True))
 
     first = True
@@ -168,5 +192,5 @@ async def _stream_completion(
     if final is None:  # pragma: no cover - the engine protocol guarantees one
         raise RuntimeError("engine stream finished without a final completion")
 
-    yield chunk(Delta(), final.finish_reason)
+    yield chunk(Delta(), final.finish_reason, _citations(final))
     yield _sse(_DONE)

@@ -6,13 +6,13 @@ Every stage prompt references this file. Update it at the end of each stage.
 | | |
 |---|---|
 | **Current version** | `0.1.0` |
-| **Current stage** | Stage 3 — Agents (**complete**) |
-| **Overall progress** | **3 / 10 stages — 30%** |
-| **Next milestone** | Stage 4 — RAG |
-| **Last updated** | 2026-07-15 |
+| **Current stage** | Stage 4 — RAG (**complete**) |
+| **Overall progress** | **4 / 10 stages — 40%** |
+| **Next milestone** | Stage 5 — Observability |
+| **Last updated** | 2026-07-16 |
 
 ```
-Progress  [███───────]  3/10
+Progress  [████──────]  4/10
 ```
 
 ---
@@ -82,12 +82,12 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
 | 1 | Foundation | [stage-01-foundation.md](stage-summaries/stage-01-foundation.md) | [stage-01-foundation.md](verification-log/stage-01-foundation.md) | 2026-07-14 |
 | 2 | API | [stage-02-api.md](stage-summaries/stage-02-api.md) | [stage-02-api.md](verification-log/stage-02-api.md) | 2026-07-14 |
 | 3 | Agents | [stage-03-agents.md](stage-summaries/stage-03-agents.md) | [stage-03-agents.md](verification-log/stage-03-agents.md) | 2026-07-15 |
+| 4 | RAG | [stage-04-rag.md](stage-summaries/stage-04-rag.md) | [stage-04-rag.md](verification-log/stage-04-rag.md) | 2026-07-16 |
 
 ## Remaining stages
 
 | Stage | Name | Summary file (fixed) | Objective |
 |:-----:|------|----------------------|-----------|
-| 4 | RAG | `stage-04-rag.md` | Retrieval: LlamaIndex ingestion/chunking, embeddings, Qdrant-backed `Retriever`/`VectorStore`, grounded answers with citations |
 | 5 | Observability | `stage-05-observability.md` | OpenTelemetry traces/metrics export, `@traced` → real spans, Grafana dashboards, alerting |
 | 6 | MLOps | `stage-06-mlops.md` | Evaluation (`Evaluator`), eval datasets, LLM-as-judge, regression gates in CI, pipelines |
 | 7 | Kubernetes | `stage-07-kubernetes.md` | K8s manifests/Helm (probes → `/health`, `/ready`), Terraform provisioning |
@@ -109,7 +109,17 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
   routes and wire format did not change, which is what the seam was for.
 - **Agent loop with tool use** — `reason → select tool → execute → observe →
   answer`, as an explicit LangGraph state machine, bounded by a step cap. Three
-  deterministic offline tools: `calculator`, `text_stats`, `json_query`.
+  deterministic offline tools: `calculator`, `text_stats`, `json_query`, plus a
+  `document_search` retrieval tool wired in when Qdrant is available (Stage 4).
+- **Grounded answers with citations (Stage 4)** — a document corpus is ingested
+  (LlamaIndex chunking → Voyage embeddings → Qdrant) by `scripts/ingest.py`; the
+  agent retrieves relevant passages via `document_search` and answers from them.
+  Retrieved chunks surface as a new top-level `citations` field on the response
+  (ADR 0013). Retrieved text is fenced as untrusted data behind a per-call nonce
+  (ADR 0014). Qdrant now holds real data.
+- **Second hermetic provider seam (Stage 4)** — the `test` profile *cannot*
+  construct a real Voyage embeddings client either; embeddings go through a
+  deterministic offline hash. CI needs no `VOYAGE_API_KEY` (ADR 0011).
 - **Real token accounting** — the model's own `input_tokens` / `output_tokens`,
   summed across every model call a run makes (ADR 0006).
 - **Conversation state** — Postgres schema + a forward-only SQL migration runner
@@ -122,8 +132,8 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
 - **SSE streaming** — `"stream": true` returns `text/event-stream` with
   `data: {json}` frames terminated by `data: [DONE]` (ADR 0004).
 - **Pooled datastore connections** — Postgres (asyncpg), Redis (redis.asyncio)
-  and Qdrant (pooled `httpx` → `/readyz`); opened concurrently in the lifespan,
-  closed on shutdown (ADR 0005).
+  and Qdrant (`qdrant-client`, probed via `get_collections()`); opened
+  concurrently in the lifespan, closed on shutdown (ADR 0005, 0012).
 - **Real readiness probes** — `/ready` concurrently probes every configured store
   and returns **503** `not_ready` when any is unavailable; `/health` stays pure
   liveness and touches no datastore.
@@ -134,9 +144,9 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
   bound to a `ContextVar`, echoed on the response, present on every access log.
 - **Typed layered configuration** — pydantic-settings with `dev`/`test`/`prod`
   profiles; OS env > `.env` > profile file > defaults; no secrets committed.
-  **`prod` refuses to boot** without all three datastore URLs *or its
-  `ANTHROPIC_API_KEY`* (ADR 0005, 0006); the `test` profile ignores the root
-  `.env` so the suite stays hermetic.
+  **`prod` refuses to boot** without all three datastore URLs, its
+  `ANTHROPIC_API_KEY`, *or its `VOYAGE_API_KEY`* (ADR 0005, 0006, 0011); the
+  `test` profile ignores the root `.env` so the suite stays hermetic.
 - **Prometheus metrics** — request counter + latency histogram, labelled by
   route template; scraped successfully by the Prometheus container.
 - **Global error handling** — uniform `{"error": {...}}` envelope; 500s never
@@ -144,19 +154,26 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
 - **Lifespan hooks** — `service.startup` / `service.shutdown`.
 - **Docker Compose stack** — api (multi-stage, **non-root** uid 1001), postgres,
   redis, qdrant, prometheus, grafana (datasource provisioned as code).
-- **Quality gate** — ruff, ruff-format, mypy `strict`, pytest (185 tests),
-  pre-commit; GitHub Actions runs all of it plus a Docker build against live
-  postgres/redis/qdrant service containers, asserting `/ready` reports every
+- **Quality gate** — ruff, ruff-format, mypy `strict`, pytest (246 tests, plus
+  opt-in live-datastore / live-Qdrant / live-provider layers that skip by
+  default), pre-commit; GitHub Actions runs all of it plus a Docker build against
+  live postgres/redis/qdrant service containers, asserting `/ready` reports every
   store `ok` and that chat + SSE work.
 
 ### ❌ Does not exist yet
 
-No RAG/vector search · **no authentication** · no OpenTelemetry backend · no
-Grafana dashboards · no Kubernetes/Terraform · no evaluation · no load testing.
+**No authentication** (the corpus and API are both unauthenticated) · no
+OpenTelemetry backend · no Grafana dashboards · no Kubernetes/Terraform · no
+evaluation · no load testing.
 
-**Qdrant is still connected and probed but holds no data** — it is reached only
-for `GET /readyz`, and belongs to Stage 4. Postgres and Redis now hold real data
-(conversation history and its cache).
+All three datastores now hold real data — Postgres (conversation history), Redis
+(its cache), and **Qdrant (document vectors, new in Stage 4)**.
+
+Retrieval is deliberately minimal: no reranking, no hybrid search, no query
+expansion, no automatic re-ingestion (an operator runs `scripts/ingest.py`), and
+editing a document shorter leaves orphaned tail chunks (ADR 0012). The
+prompt-injection mitigation is delimiting + labelling, not full hardening — no
+classifier, no trust tiers, no egress filtering (ADR 0014, Stage 8).
 
 Within the agent stack, deliberately deferred: prompt caching, context
 compaction (a long enough conversation will exceed the context window and fail),
@@ -168,34 +185,33 @@ no endpoint returns a collection yet. Revisit when one does.
 
 ---
 
-## Next milestone — Stage 4 (RAG)
+## Next milestone — Stage 5 (Observability)
 
-**Objective:** grounded answers with citations.
+**Objective:** real distributed tracing and metrics export, dashboards, alerting.
 
 Expected scope:
 
-1. Implement `Retriever` / `VectorStore` (currently stubs raising `NotImplementedError`).
-2. LlamaIndex ingestion + chunking; embeddings; promote the `retrieval` extra.
-3. Qdrant-backed vector search — swap the Stage 2 `httpx` readiness probe for
-   `qdrant-client` behind the same `Datastore` contract.
-4. A retrieval tool in the agent's registry, so the loop can ground its answers.
-5. Citations in the response.
+1. `services/monitoring` — a `SpanExporter`; make `@traced` emit real
+   OpenTelemetry spans without touching call sites (the seam exists for this).
+2. OTel traces + metrics export to a collector; wire the pinned `observability`
+   extra.
+3. Grafana dashboards provisioned as code; alerting rules on symptom-level
+   signals.
 
-**Prerequisites** (all met): the agent loop and its `ToolRegistry` (a retrieval
-tool is a new `Tool`, not a new loop), the `Datastore` seam, Qdrant already
-pooled and probed, and conversation persistence.
+**Prerequisites** (all met): the `@traced` seam on every application function,
+structured JSON logging, Prometheus metrics + Grafana already in the compose
+stack.
 
-**Note for Stage 4:** Stage 3's tools are pure functions of their arguments,
-which is what makes tool results safe to feed back into the model unexamined.
-A retrieval tool returns *document text* — potentially attacker-controlled — so
-prompt injection through tool results becomes a real concern the moment it lands.
+**Resolved in Stage 4 (was carried forward from Stage 3):** the missing contract
+test against the real external APIs. Stage 4 added an opt-in, double-gated live
+contract test (ADR 0015) that makes one real call each to the Anthropic chat API
+and the Voyage embeddings API and asserts the response shapes the code assumes.
+It is not run in CI (CI stays key-free and hermetic) — a human runs it
+deliberately when changing `llm.py` or `embeddings.py`.
 
-**Carried forward from Stage 3 — unresolved, flag when drafting the Stage 4
-prompt:** no contract test exists against the real Anthropic API. CI proves the
-HTTP surface only and never makes a live model call, so a provider-side field
-rename (usage keys, event names, response shape) would pass CI undetected. The
-only thing that ever exercised the real API was two manually-approved live
-calls in Stage 3 (~$0.021), a one-off, not a repeatable check. Decide during
-Stage 4 scoping whether this belongs there or is explicitly deferred to
-Stage 6 (MLOps/evaluation) — do not let it silently fall through the gap
-between the two.
+**Note carried to Stage 8 (security):** the retrieval prompt-injection mitigation
+shipped in Stage 4 is delimiting + labelling only (ADR 0014). It removes
+ambiguity about what is data but is not immunity, and there is no classifier,
+trust tiering, or answer egress filtering. Widening what can enter the corpus
+(user uploads, crawls, third-party feeds) changes the threat model and must
+revisit ADR 0014.

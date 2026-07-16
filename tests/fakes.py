@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from services.retrieval.base import DocumentChunk, RetrievedDocument, VectorStore
 from shared.datastores import Datastore
 
 if TYPE_CHECKING:
@@ -159,6 +160,51 @@ class FakePgAcquire:
 
     async def __aexit__(self, *exc: object) -> None:
         return None
+
+
+class StubRetriever:
+    """A Retriever that returns a fixed result set and records its calls.
+
+    For tests about what the *tool* does with retrieved documents — fencing,
+    citations, empty results — which do not depend on how they were found.
+    """
+
+    def __init__(self, documents: Sequence[RetrievedDocument]) -> None:
+        self._documents = list(documents)
+        self.calls: list[tuple[str, int | None]] = []
+
+    async def retrieve(
+        self, query: str, *, top_k: int | None = None
+    ) -> Sequence[RetrievedDocument]:
+        self.calls.append((query, top_k))
+        return list(self._documents)
+
+
+class InMemoryVectorStore(VectorStore):
+    """A VectorStore backed by a list. Stands in for Qdrant.
+
+    Honest about what it is: it **does not compute similarity**. `query` returns
+    its documents in the order given, already scored, so a test using it proves
+    the retriever's own logic (top_k plumbing, the score floor) and *not* that
+    Qdrant ranks anything correctly. Verifying real search needs a real Qdrant —
+    see `TestAgainstRealQdrant` in test_integration_retrieval.py.
+    """
+
+    def __init__(self, documents: Sequence[RetrievedDocument]) -> None:
+        self.documents = list(documents)
+        self.upserted: list[DocumentChunk] = []
+        self.queries: list[int] = []
+        self.collections_ensured = 0
+
+    async def ensure_collection(self) -> None:
+        self.collections_ensured += 1
+
+    async def upsert(self, chunks: Sequence[DocumentChunk]) -> None:
+        self.upserted.extend(chunks)
+
+    async def query(self, embedding: Sequence[float], *, top_k: int) -> Sequence[RetrievedDocument]:
+        self.queries.append(top_k)
+        return self.documents[:top_k]
 
 
 class FakePgPool:

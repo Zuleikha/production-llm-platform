@@ -21,18 +21,26 @@ streaming and would otherwise reimplement them.
 and transports belong to the orchestrator above it, which is what lets the same
 agent be driven by a chat request today and an evaluation harness in Stage 6.
 
-## Tools (`tools.py`)
+## Tools
 
-| Tool | Does |
-|------|------|
-| `calculator` | Evaluates an arithmetic expression |
-| `text_stats` | Character / word / line counts |
-| `json_query` | Reads one value from a JSON document by dotted path |
+| Tool | Does | Lives in |
+|------|------|----------|
+| `calculator` | Evaluates an arithmetic expression | `tools.py` |
+| `text_stats` | Character / word / line counts | `tools.py` |
+| `json_query` | Reads one value from a JSON document by dotted path | `tools.py` |
+| `document_search` | Searches the RAG corpus and returns cited excerpts | `services/retrieval/tool.py` (Stage 4) |
 
-Every tool is **deterministic and offline** — a pure function of its arguments.
-That is what lets the agent loop be exercised end to end in a hermetic test
-suite. Retrieval / vector-search tools belong to **Stage 4** and must not be
-added here.
+The three tools in `tools.py` are **deterministic and offline** — pure functions
+of their arguments — and `ToolRegistry.default()` returns exactly those, which is
+what lets the agent loop be exercised end to end in a hermetic suite.
+
+`document_search` is the first tool that is not a pure function. It lives in
+`services/retrieval/`, not here, and is injected into the registry at wiring time
+(`ToolRegistry.with_tools`, called from `services.api.app`). The dependency runs
+retrieval → agents, which keeps this package the generic agent kernel: it knows
+what a tool *is*, not what any particular tool talks to. `Tool.run` is async from
+Stage 4 so retrieval can do I/O like any other tool rather than being a special
+case in the loop.
 
 Two rules for anyone adding a tool:
 
@@ -40,8 +48,17 @@ Two rules for anyone adding a tool:
   influenced by whatever text reached its context. `calculator` parses to an AST
   and walks an allow-list rather than calling `eval`, and caps exponents so an
   allow-listed operator cannot hang the process.
-- **Tool results are untrusted input.** They go straight back into the model's
-  context. Today's tools only return values derived from their own arguments,
-  which is what makes that safe — Stage 4 changes that and must revisit it.
+- **Tool results are untrusted input, and from Stage 4 that is a live concern.**
+  A tool result goes straight back into the model's context. Through Stage 3
+  every tool returned values derived solely from its own arguments, which made
+  feeding results back unexamined safe. **`document_search` returns document
+  text** — potentially attacker-controlled — which is exactly the case that
+  breaks that assumption. The mitigation (nonce-fenced excerpts labelled as
+  untrusted data, provenance carried out-of-band as typed citations) and, just
+  as importantly, its documented limits (delimiting is not immunity; a persuasive
+  injected instruction may still be obeyed) are in **ADR 0014** and in the tool
+  module's own docstring. **Anyone adding a tool that reads outside data, or
+  widening what can enter the corpus, is changing the threat model and must read
+  ADR 0014 first.**
 
-See ADR 0006.
+See ADR 0006 (loop) and ADR 0014 (retrieval-tool injection boundary).

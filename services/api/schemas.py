@@ -72,6 +72,27 @@ class Choice(BaseModel):
     finish_reason: FinishReason
 
 
+class CitationModel(BaseModel):
+    """One source the agent consulted, traceable back to a source document.
+
+    A **new top-level field**, deliberately not folded into `message.content` or
+    `usage`. Citations are structured data about provenance; the OpenAI-shaped
+    fields around them mean something else, and overloading one of them would
+    make a client parse prose to find out what grounded an answer. See ADR 0013.
+
+    `id` and `document_id` differ on purpose: `id` identifies the exact chunk
+    that matched (`handbook.md:3`), `document_id` the document it came from
+    (`handbook.md`). A client resolving a citation to something a human can open
+    wants the second; one deduplicating or highlighting wants the first.
+    """
+
+    id: str
+    document_id: str
+    source: str
+    score: float
+    text: str
+
+
 class ChatCompletionResponse(BaseModel):
     """A non-streamed chat completion."""
 
@@ -81,6 +102,15 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: list[Choice]
     usage: Usage
+    citations: list[CitationModel] = Field(
+        default_factory=list,
+        description=(
+            "Sources the agent retrieved to ground this answer, best match "
+            "first. Empty when the answer was not grounded in retrieved "
+            "documents — an ungrounded answer reports no sources rather than "
+            "omitting the field. See ADR 0013."
+        ),
+    )
 
 
 class Delta(BaseModel):
@@ -110,3 +140,15 @@ class ChatCompletionChunk(BaseModel):
     created: int
     model: str
     choices: list[ChunkChoice]
+    citations: list[CitationModel] | None = Field(
+        default=None,
+        description=(
+            "Present on the final chunk only (the one carrying `finish_reason`), "
+            "and omitted from every other frame. Citations are only known once "
+            "the run is complete — the agent may search again after its first "
+            "answer text — so a client must read them from the final frame "
+            "rather than accumulate them. An empty list means the run retrieved "
+            "nothing; the field being absent means the frame is not the last. "
+            "See ADR 0013."
+        ),
+    )

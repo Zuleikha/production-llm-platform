@@ -21,6 +21,7 @@ from shared.migrations import apply_pending
 from shared.observability import traced
 from shared.version import get_version
 
+from services.agents.tools import ToolRegistry
 from services.api.completions import CompletionEngine, OrchestratorEngine
 from services.api.errors import register_exception_handlers
 from services.api.middleware import RequestContextMiddleware
@@ -29,6 +30,8 @@ from services.orchestrator.base import AgentOrchestrator
 from services.orchestrator.conversations import build_conversation_store
 from services.orchestrator.graph import AgentGraph
 from services.orchestrator.llm import build_llm_client
+from services.retrieval.retriever import build_retriever
+from services.retrieval.tool import DocumentSearch
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -37,14 +40,34 @@ _logger = get_logger("api.app")
 
 
 @traced
+def _build_tools(settings: Settings, registry: DatastoreRegistry) -> ToolRegistry:
+    """The offline tools, plus document retrieval when there is a Qdrant to search.
+
+    This is where the retrieval tool joins the set the agent may call (Stage 4).
+    It is composed here rather than inside ``ToolRegistry.default()`` because a
+    tool needing a live datastore cannot be a default — and because
+    ``services.agents`` deliberately does not know retrieval exists.
+    """
+    tools = ToolRegistry.default()
+    retriever = build_retriever(settings, registry.qdrant_client)
+    if retriever is None:
+        _logger.info("retrieval.tool_disabled", extra={"reason": "qdrant not available"})
+        return tools
+    _logger.info("retrieval.tool_enabled", extra={"collection": settings.qdrant_collection})
+    return tools.with_tools(DocumentSearch(retriever))
+
+
+@traced
 def _build_engine(settings: Settings, registry: DatastoreRegistry) -> OrchestratorEngine:
     """Assemble the agent stack behind the completion seam.
 
     Called after ``registry.startup()``: the conversation store needs live
-    pools, and a store built before them would hold ``None`` forever.
+    pools, and a store built before them would hold ``None`` forever. The same
+    now goes for the retrieval tool, which needs a live Qdrant client.
     """
     graph = AgentGraph(
         build_llm_client(settings),
+        tools=_build_tools(settings, registry),
         max_steps=settings.agent_max_steps,
         max_tokens=settings.anthropic_max_tokens,
     )

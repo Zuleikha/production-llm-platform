@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 from services.agents.base import ToolAgent
-from services.agents.tools import Tool, ToolRegistry
+from services.agents.tools import Tool, ToolRegistry, ToolResult
 from services.orchestrator.graph import AgentGraph
 from services.orchestrator.llm import AssistantTurn, ScriptedLLMClient, TokenUsage
 
@@ -54,7 +54,7 @@ class ExplodingTool(Tool):
     def input_schema(self) -> dict[str, Any]:
         return {"type": "object", "properties": {}}
 
-    def run(self, **kwargs: Any) -> str:
+    async def run(self, **kwargs: Any) -> ToolResult:
         raise RuntimeError("boom")
 
 

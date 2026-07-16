@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from shared.observability import traced
 
+from services.agents.tools import Citation
 from services.orchestrator.conversations import Turn
 from services.orchestrator.llm import TokenUsage
 
@@ -34,11 +35,15 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class Completion:
-    """A finished reply and what it cost."""
+    """A finished reply, what it cost, and what it was grounded in."""
 
     text: str
     usage: TokenUsage
     finish_reason: FinishReason
+    # Sources the agent's tools consulted (Stage 4). Like `usage`, only the
+    # engine can know this: the route cannot see the tool calls an agent run
+    # made. Empty when the answer was not grounded in retrieved documents.
+    citations: tuple[Citation, ...] = ()
 
 
 # A stream is many text pieces followed by exactly one Completion. Expressed as a
@@ -126,6 +131,7 @@ class OrchestratorEngine:
             text=result.answer,
             usage=result.usage,
             finish_reason=_finish_reason(result.stop_reason),
+            citations=result.citations,
         )
 
     async def stream(
@@ -149,4 +155,5 @@ class OrchestratorEngine:
                     text=item.answer,
                     usage=item.usage,
                     finish_reason=_finish_reason(item.stop_reason),
+                    citations=item.citations,
                 )

@@ -1,20 +1,25 @@
 """The tool registry: what the agent is allowed to do.
 
-Every tool here is **deterministic and offline**. That is a deliberate
-constraint, not a placeholder: the agent loop is exercised end to end in the
-test suite, and a tool that reaches a live external API would make those tests
-flaky and non-hermetic. Tools that call the network arrive with the stages that
-own them — retrieval/vector search is Stage 4 and stays out of this registry.
+The tools **in this module** are deterministic, offline pure functions of their
+arguments. That is what lets the agent loop be exercised end to end in a hermetic
+suite. ``ToolRegistry.default()`` returns exactly those, and nothing here reaches
+the network.
 
-Tools are also domain-agnostic: generic engineering utilities, not a named
-product's operations. The point of the stage is the *loop*, and a narrow domain
-tool would prove less about it.
+Stage 4 adds the first tool that is *not* a pure function — document retrieval,
+which embeds a query with Voyage and searches Qdrant. It deliberately lives in
+:mod:`services.retrieval.tool` rather than here, and is injected into the
+registry at wiring time (see ``services.api.app``). The dependency runs
+retrieval -> agents, which keeps this module the generic agent kernel: it knows
+what a tool *is*, not what any particular tool talks to.
 
-Tool results are **untrusted input**. A tool returns text that goes straight
-back into the model's context, so a tool that read attacker-controlled data
-could carry an injected instruction with it. The tools here only ever return
-values derived from their own arguments, which is what makes that safe today —
-Stage 4 changes that and must revisit it.
+Tool results are **untrusted input** — and from Stage 4 that is a live concern
+rather than a latent one. A tool's result text goes straight back into the
+model's context, so a tool that reads attacker-controlled data can carry an
+injected instruction with it. Through Stage 3 every tool returned values derived
+solely from its own arguments, which is what made feeding results back unexamined
+safe. Retrieval returns **document text**, which is exactly the case that breaks
+that assumption. See ``README.md`` and ADR 0014 for the threat and the mitigation
+applied; anyone adding a tool that reads outside data must read those first.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ import ast
 import json
 import operator
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final
 
 from shared.observability import traced
@@ -38,6 +44,37 @@ class ToolError(Exception):
     doesn't work". The loop feeds it back to the model as an error result so it
     can correct itself, rather than aborting the run.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class Citation:
+    """A source a tool consulted to produce its result.
+
+    Provenance, carried out of the tool as **typed data** rather than left for
+    someone to parse back out of the result text. Text is what the model reads;
+    this is what the client gets. Deriving one from the other in either direction
+    is how a citation ends up pointing at something the answer did not use.
+    See ADR 0013.
+    """
+
+    id: str
+    document_id: str
+    source: str
+    score: float
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ToolResult:
+    """What a tool hands back: text for the model, citations for the client.
+
+    ``citations`` is empty for every tool that is a pure function of its
+    arguments — there is no source to cite when the answer was computed rather
+    than looked up.
+    """
+
+    content: str
+    citations: tuple[Citation, ...] = field(default_factory=tuple)
 
 
 class Tool(ABC):
@@ -67,8 +104,14 @@ class Tool(ABC):
         """JSON Schema for ``run``'s keyword arguments."""
 
     @abstractmethod
-    def run(self, **kwargs: Any) -> str:
+    async def run(self, **kwargs: Any) -> ToolResult:
         """Execute the tool and return a result for the model to read.
+
+        Async since Stage 4: retrieval has to embed a query and search a vector
+        store, both of which are I/O. The three pure tools below gain nothing
+        from it, but one contract the loop can await beats two contracts and a
+        dispatch on which kind a tool is. The *loop* is unchanged — ``act`` still
+        runs every requested tool and appends the results.
 
         Raises:
             ToolError: when the supplied arguments are unusable.
@@ -134,13 +177,13 @@ class Calculator(Tool):
         }
 
     @traced
-    def run(self, **kwargs: Any) -> str:
+    async def run(self, **kwargs: Any) -> ToolResult:
         expression = _require_str(kwargs, "expression")
         try:
             tree = ast.parse(expression, mode="eval")
         except SyntaxError as exc:
             raise ToolError(f"{expression!r} is not a valid expression: {exc.msg}") from exc
-        return str(self._eval(tree.body))
+        return ToolResult(content=str(self._eval(tree.body)))
 
     def _eval(self, node: ast.expr) -> float | int:
         if isinstance(node, ast.Constant):
@@ -202,15 +245,17 @@ class TextStats(Tool):
         }
 
     @traced
-    def run(self, **kwargs: Any) -> str:
+    async def run(self, **kwargs: Any) -> ToolResult:
         text = _require_str(kwargs, "text")
-        return json.dumps(
-            {
-                "characters": len(text),
-                "words": len(text.split()),
-                # An empty string is zero lines; anything else has at least one.
-                "lines": len(text.splitlines()) if text else 0,
-            }
+        return ToolResult(
+            content=json.dumps(
+                {
+                    "characters": len(text),
+                    "words": len(text.split()),
+                    # An empty string is zero lines; anything else has at least one.
+                    "lines": len(text.splitlines()) if text else 0,
+                }
+            )
         )
 
 
@@ -247,7 +292,7 @@ class JsonQuery(Tool):
         }
 
     @traced
-    def run(self, **kwargs: Any) -> str:
+    async def run(self, **kwargs: Any) -> ToolResult:
         document = _require_str(kwargs, "document")
         path = _require_str(kwargs, "path")
         try:
@@ -257,7 +302,7 @@ class JsonQuery(Tool):
 
         for segment in filter(None, path.split(".")):
             current = self._descend(current, segment, path)
-        return json.dumps(current)
+        return ToolResult(content=json.dumps(current))
 
     @staticmethod
     def _descend(current: Any, segment: str, path: str) -> Any:
@@ -289,8 +334,27 @@ class ToolRegistry:
 
     @classmethod
     def default(cls) -> ToolRegistry:
-        """The tools every agent gets unless a caller says otherwise."""
+        """The tools every agent gets unless a caller says otherwise.
+
+        Offline and deterministic, every one. Retrieval is **not** here: it needs
+        a live ``Retriever``, and a default that silently did no retrieval would
+        be worse than one that has none. ``with_tools`` is how it gets added.
+        """
         return cls([Calculator(), TextStats(), JsonQuery()])
+
+    def with_tools(self, *tools: Tool) -> ToolRegistry:
+        """Return a new registry: this one's tools plus ``tools``.
+
+        How the retrieval tool joins the set the agent may call, without
+        ``services.agents`` having to know retrieval exists. Returns a new
+        registry rather than mutating: a registry is rendered into the model's
+        tool specifications once at graph construction, and a set that could
+        change afterwards would silently disagree with what the model was told.
+
+        Raises:
+            ValueError: on a duplicate tool name.
+        """
+        return ToolRegistry([*self._tools.values(), *tools])
 
     def __len__(self) -> int:
         return len(self._tools)
@@ -332,10 +396,10 @@ class ToolRegistry:
         ]
 
     @traced
-    def invoke(self, name: str, arguments: dict[str, Any]) -> str:
-        """Run tool ``name`` with ``arguments``, returning its result text.
+    async def invoke(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+        """Run tool ``name`` with ``arguments``, returning its result.
 
         Raises:
             ToolError: if the tool is unknown or the arguments are unusable.
         """
-        return self.get(name).run(**arguments)
+        return await self.get(name).run(**arguments)

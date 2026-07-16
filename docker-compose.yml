@@ -38,6 +38,11 @@ services:
       # chat request fails: `dev` does not require the key at boot, only `prod`
       # does (ADR 0006). Export it before `docker compose up`.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Same rules, second vendor (Stage 4, ADR 0011). Without it the container
+      # boots and chat works, but `document_search` fails on every call and the
+      # agent answers ungrounded. Needed by `scripts/ingest.py` too — that is
+      # what actually spends the money.
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -81,7 +86,11 @@ services:
     networks: [platform]
 
   qdrant:
-    image: qdrant/qdrant:v1.12.4
+    # Kept in lockstep with the pinned `qdrant-client` (1.18.0): the client warns
+    # and may misbehave when the server's minor version is more than one away.
+    # Stage 2 could pin the server freely because it spoke raw HTTP; Stage 4 uses
+    # the real client, so the two versions now move together. See ADR 0012.
+    image: qdrant/qdrant:v1.18.1
     restart: unless-stopped
     ports:
       - "6333:6333"   # HTTP / dashboard

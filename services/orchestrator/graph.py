@@ -31,7 +31,7 @@ from langgraph.graph import END, START, StateGraph
 from shared.logging import get_logger
 from shared.observability import traced
 
-from services.agents.tools import ToolError, ToolRegistry
+from services.agents.tools import Citation, ToolError, ToolRegistry
 from services.orchestrator.llm import (
     AssistantTurn,
     TextDelta,
@@ -65,6 +65,27 @@ def _accumulate_usage(left: TokenUsage, right: TokenUsage) -> TokenUsage:
     return left + right
 
 
+def _accumulate_citations(
+    left: tuple[Citation, ...], right: tuple[Citation, ...]
+) -> tuple[Citation, ...]:
+    """Reducer: citations accumulate across every tool call of a run, deduped.
+
+    An agent may search several times before answering, and the same chunk can
+    come back from more than one query — the client should see it once. First
+    occurrence wins, so the order reflects when the agent actually found each
+    source. Deduping here rather than at the API boundary keeps the reported
+    citations consistent between the streamed and non-streamed paths, which read
+    different parts of this state.
+    """
+    merged = list(left)
+    seen = {citation.id for citation in left}
+    for citation in right:
+        if citation.id not in seen:
+            seen.add(citation.id)
+            merged.append(citation)
+    return tuple(merged)
+
+
 class AgentState(TypedDict):
     """What flows through the graph.
 
@@ -83,6 +104,11 @@ class AgentState(TypedDict):
     # compiled graph can serve requests with different max_tokens — the Anthropic
     # API requires the parameter on every call and the client may set it.
     max_tokens: int
+    # Sources the tools consulted, accumulated across the run (Stage 4). Carried
+    # as typed data alongside the messages rather than parsed back out of them:
+    # the text the model saw is fenced, untrusted document content, and rebuilding
+    # provenance from it would let a document forge its own citation (ADR 0013).
+    citations: Annotated[tuple[Citation, ...], _accumulate_citations]
 
 
 def _as_state(value: object) -> AgentState:
@@ -98,6 +124,7 @@ def _as_state(value: object) -> AgentState:
         raise TypeError(f"agent graph returned {type(value).__name__}, expected a state mapping")
     usage = value.get("usage")
     stop_reason = value.get("stop_reason")
+    citations = value.get("citations")
     return AgentState(
         messages=list(value.get("messages", [])),
         answer=str(value.get("answer", "")),
@@ -105,6 +132,11 @@ def _as_state(value: object) -> AgentState:
         steps=int(value.get("steps", 0)),
         stop_reason=stop_reason if isinstance(stop_reason, str) else None,
         max_tokens=int(value.get("max_tokens", 0)),
+        citations=(
+            tuple(c for c in citations if isinstance(c, Citation))
+            if isinstance(citations, tuple | list)
+            else ()
+        ),
     )
 
 
@@ -207,27 +239,37 @@ class AgentGraph:
         """
         last = state["messages"][-1]
         results: list[dict[str, Any]] = []
+        citations: list[Citation] = []
         for block in last.get("content", []):
             if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
             name = str(block.get("name", ""))
             arguments = block.get("input")
-            results.append(
-                self._invoke_one(
-                    tool_use_id=str(block.get("id", "")),
-                    name=name,
-                    arguments=arguments if isinstance(arguments, dict) else {},
-                )
+            result, cited = await self._invoke_one(
+                tool_use_id=str(block.get("id", "")),
+                name=name,
+                arguments=arguments if isinstance(arguments, dict) else {},
             )
+            results.append(result)
+            citations.extend(cited)
         # All results go back in ONE user message. Splitting them across several
         # messages trains the model out of requesting parallel tool calls.
-        return {"messages": [*state["messages"], {"role": "user", "content": results}]}
+        return {
+            "messages": [*state["messages"], {"role": "user", "content": results}],
+            "citations": tuple(citations),
+        }
 
-    def _invoke_one(
+    async def _invoke_one(
         self, *, tool_use_id: str, name: str, arguments: dict[str, Any]
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], tuple[Citation, ...]]:
+        """Run one tool, returning its wire-format result and what it cited.
+
+        A failing tool cites nothing: an error result is not grounding, and
+        reporting a source for an answer the tool never produced would be a lie
+        the client has no way to detect.
+        """
         try:
-            content = self._tools.invoke(name, arguments)
+            result = await self._tools.invoke(name, arguments)
         except ToolError as exc:
             _logger.info("agent.tool_failed", extra={"tool": name, "error": str(exc)})
             return {
@@ -235,7 +277,7 @@ class AgentGraph:
                 "tool_use_id": tool_use_id,
                 "content": str(exc),
                 "is_error": True,
-            }
+            }, ()
         except Exception as exc:
             # An unexpected tool bug is ours, not the model's. Log it loudly with
             # the trace, but still hand the model an error result so the run can
@@ -246,9 +288,16 @@ class AgentGraph:
                 "tool_use_id": tool_use_id,
                 "content": f"tool {name!r} failed unexpectedly",
                 "is_error": True,
-            }
-        _logger.info("agent.tool_succeeded", extra={"tool": name})
-        return {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
+            }, ()
+        _logger.info(
+            "agent.tool_succeeded",
+            extra={"tool": name, "citations": len(result.citations)},
+        )
+        return {
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": result.content,
+        }, result.citations
 
     def _initial(self, messages: Sequence[dict[str, Any]], max_tokens: int | None) -> AgentState:
         return {
@@ -258,6 +307,7 @@ class AgentGraph:
             "steps": 0,
             "stop_reason": None,
             "max_tokens": max_tokens or self._max_tokens,
+            "citations": (),
         }
 
     @traced

@@ -49,6 +49,12 @@ COPY --from=builder --chown=app:app /app/.venv /app/.venv
 COPY --chown=app:app shared/ /app/shared/
 COPY --chown=app:app services/ /app/services/
 COPY --chown=app:app config/ /app/config/
+# The RAG corpus and the ingestion CLI (Stage 4). The API itself never reads
+# these — ingestion is an operator action with a bill attached, not a startup
+# hook — but shipping them means `docker exec ... python scripts/ingest.py` can
+# populate Qdrant from the same image that serves the traffic.
+COPY --chown=app:app data/ /app/data/
+COPY --chown=app:app scripts/ingest.py /app/scripts/ingest.py
 
 USER app
 

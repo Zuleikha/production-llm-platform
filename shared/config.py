@@ -89,6 +89,43 @@ class Settings(BaseSettings):
     # --- Conversation cache (Stage 3, ADR 0008) ---
     conversation_cache_ttl_seconds: int = Field(default=300, gt=0)
 
+    # --- Voyage AI / embeddings (Stage 4, ADR 0011) ---
+    # Anthropic ships no embeddings API; Voyage is the documented pairing for
+    # Claude RAG workloads. The key comes from the OS environment ONLY, exactly
+    # like anthropic_api_key: never a committed file, mandatory under `prod`,
+    # and ignored entirely under `test` — the test profile cannot construct a
+    # real Voyage client at all (ADR 0011).
+    voyage_api_key: str | None = None
+    voyage_model: str = "voyage-3.5-lite"
+    # Voyage's output dimensionality. Declared rather than discovered because it
+    # is also the Qdrant collection's vector size, which is fixed at creation:
+    # a mismatch between this and the live model is a boot-time error worth
+    # having, not a silent recall collapse (ADR 0012).
+    voyage_embedding_dimensions: int = Field(default=1024, gt=0)
+    voyage_timeout_seconds: float = Field(default=30.0, gt=0)
+
+    # --- Retrieval / Qdrant (Stage 4, ADR 0012) ---
+    qdrant_collection: str = "documents"
+    # Chunking. 512 tokens is well inside Voyage's context and keeps a chunk
+    # small enough that a citation points at something a human can actually read.
+    chunk_size_tokens: int = Field(default=512, gt=0)
+    chunk_overlap_tokens: int = Field(default=64, ge=0)
+    retrieval_top_k: int = Field(default=4, ge=1)
+
+    @model_validator(mode="after")
+    def _chunk_overlap_must_fit_in_chunk(self) -> Settings:
+        """Reject an overlap that is not smaller than the chunk itself.
+
+        LlamaIndex's splitter raises on this deep inside ingestion, long after
+        boot; catching it here names the two settings that disagree.
+        """
+        if self.chunk_overlap_tokens >= self.chunk_size_tokens:
+            raise ValueError(
+                "CHUNK_OVERLAP_TOKENS must be smaller than CHUNK_SIZE_TOKENS "
+                f"(got {self.chunk_overlap_tokens} >= {self.chunk_size_tokens})"
+            )
+        return self
+
     @property
     def is_production(self) -> bool:
         """True when running under the ``prod`` profile."""
@@ -113,12 +150,21 @@ class Settings(BaseSettings):
         service that has no database — a silent pass that violates fail-loud.
         Stage 3 extends the same rule to ``ANTHROPIC_API_KEY``: a prod service
         whose every chat request 401s is not a service, and the honest place to
-        say so is at boot, naming the variable. Dev and test are exempt — the
-        test profile deliberately sets neither.
+        say so is at boot, naming the variable. Stage 4 extends it again to
+        ``VOYAGE_API_KEY``: without it every retrieval query 401s, and the agent
+        degrades to answering ungrounded — which is worse than failing, because
+        it looks like it worked. Dev and test are exempt — the test profile
+        deliberately sets none of them.
         """
         if not self.is_production:
             return self
-        required = ("database_url", "redis_url", "qdrant_url", "anthropic_api_key")
+        required = (
+            "database_url",
+            "redis_url",
+            "qdrant_url",
+            "anthropic_api_key",
+            "voyage_api_key",
+        )
         missing = [name for name in required if not getattr(self, name)]
         if missing:
             names = ", ".join(name.upper() for name in missing)
