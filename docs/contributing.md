@@ -64,10 +64,25 @@ accepted: supersede, don't rewrite.
 
 ## Ending a stage
 
-Write `docs/stage-summaries/stage-NN-name.md` (fixed filenames — see
-[PROJECT_STATUS.md](PROJECT_STATUS.md)), update `PROJECT_STATUS.md`, and update
-`CLAUDE.md` so the next session starts with accurate context. Keep `CLAUDE.md`
-under ~150 lines — it is read at the start of every session.
+Every stage ends by updating **all six** of these before committing:
+
+1. **`docs/stage-summaries/stage-NN-name.md`** — fixed filename, see
+   [PROJECT_STATUS.md](PROJECT_STATUS.md).
+2. **`docs/PROJECT_STATUS.md`** — current stage, progress bar, completed-stages
+   table, next milestone.
+3. **`CLAUDE.md`** — so the next session starts with accurate context. Keep it
+   under ~150 lines; it is read at the start of every session.
+4. **`docs/architecture.md`** — and regenerate `architecture.html`
+   (`uv run python scripts/build_architecture.py`). Never edit the HTML;
+   `tests/unit/test_architecture.py` fails on drift.
+5. **`README.md`** — stage banner, roadmap table, stack table, repo structure
+   block.
+6. **`docs/verification-log/stage-NN-name.md`** — written after manual
+   verification passes, not before.
+
+**README is a required sync target every stage, not optional.** It has drifted
+before, because it duplicates information that lives elsewhere — nothing fails
+when it goes stale, so it only stays correct if it is on this list.
 
 ## Security
 
