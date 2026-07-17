@@ -30,8 +30,12 @@ coverage.xml
 # --- IDE / editor ---
 .idea/
 .vscode/
+.claude/
 *.swp
 *~
+
+# --- Personal workflow files, not project deliverables ---
+docs/cc-stage-prompt-template.txt
 
 # --- OS ---
 .DS_Store
