@@ -86,15 +86,16 @@ docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.
   test first; never edit a test to make it pass. Switching profiles needs
   `monkeypatch.setenv` **+** `get_settings.cache_clear()`. Opt-in layers skip by default:
   `TEST_DATABASE_URL`/`TEST_REDIS_URL`, `TEST_QDRANT_URL`, `RUN_LIVE_CONTRACT_TESTS=1` + keys.
+- **Ending a stage:** `docs/contributing.md` → "Ending a stage" is **canonical** and lists **six**
+  required updates — do all six before committing. **README is one** (it drifts silently).
 - **Container boot is required, not deferrable.** Before self-report, `docker build` and run
   the image in **both** `prod` and `test` profiles, and curl the stage's endpoints. A green
   `pytest` does not prove the container boots: Stage 3 deferred this and CI caught two failures
   a 2-min local boot catches (`docs/verification-log/stage-03-agents.md`).
-- **Architecture doc:** `docs/architecture.md` is the source; `architecture.html` is
-  **generated** by `scripts/build_architecture.py` — never edit the HTML. Diagrams are
-  **pre-rendered SVG** in `docs/diagrams/` — no CDN, no JS (ADR 0010). Rendering one needs
-  Node/`npx`; building + `--check` need only Python. A Mermaid keyword (`graph`, `end`) as a
-  node id fails the render. **Every stage updates the md + regenerates** (a test fails on drift).
+- **Architecture doc:** `docs/architecture.md` is the source; `architecture.html` is **generated**
+  by `scripts/build_architecture.py` — never edit it (a test fails on drift). Diagrams: pre-rendered
+  **SVG** in `docs/diagrams/`, no CDN/JS (ADR 0010); rendering needs Node/`npx`, building +
+  `--check` only Python. A Mermaid keyword (`graph`, `end`) as a node id fails the render.
 
 ## Run / test / lint
 
