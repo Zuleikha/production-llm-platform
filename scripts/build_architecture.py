@@ -49,6 +49,17 @@ _DIAGRAM_DIR = _REPO_ROOT / "docs" / "diagrams"
 # builds, which is the same drift the committed SVGs exist to prevent.
 _MERMAID_CLI = "@mermaid-js/mermaid-cli@11.4.2"
 
+# Mermaid layout config passed to mermaid-cli on every render. It exists to fix a
+# real defect: with mermaid-cli's default spacing, a state-diagram self-loop label
+# and an adjacent edge label land in the same band and OVERPRINT (e.g. the
+# datastore-lifecycle diagram's `ping ok -> "ok"` printed on top of `driver pool
+# reconnects`), and tight flowchart spacing crowds multi-line labels. Widening
+# nodeSpacing / rankSpacing / padding — and, for state diagrams, edgeLengthFactor —
+# gives every label room, so the fix lives in the renderer, not in shortened
+# labels. It applies to every diagram this module renders: the live architecture.md
+# and any historical snapshot driven through the same functions.
+_MERMAID_CONFIG = _REPO_ROOT / "scripts" / "mermaid-config.json"
+
 _GENERATED_BANNER = "GENERATED FILE - DO NOT EDIT"
 
 _CSS = """
@@ -155,15 +166,31 @@ def _slug(text: str) -> str:
     return cleaned[:40] or "diagram"
 
 
+def _config_fingerprint() -> str:
+    """A short hash of the Mermaid config, or empty string when there is none.
+
+    Folded into the diagram digest so that changing the layout config
+    (``mermaid-config.json``) invalidates every cached SVG — otherwise a config
+    change would silently keep serving the stale renders it was meant to replace,
+    which is exactly the caching trap that let the overlap bug persist.
+    """
+    if not _MERMAID_CONFIG.is_file():
+        return ""
+    normalised = _MERMAID_CONFIG.read_text(encoding="utf-8").replace("\r\n", "\n").strip()
+    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()[:8]
+
+
 def _digest(source: str) -> str:
-    """Key a rendered SVG to its exact Mermaid source.
+    """Key a rendered SVG to its exact Mermaid source *and* the layout config.
 
     Newlines are normalised first so a checkout with different line endings does
     not read as a changed diagram — this repo is developed on Windows and built
-    in Linux CI.
+    in Linux CI. The config fingerprint is mixed in so the cache key covers
+    everything that affects the rendered output, not just the diagram text.
     """
     normalised = source.replace("\r\n", "\n").strip()
-    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()[:12]
+    keyed = f"{normalised}\x00{_config_fingerprint()}"
+    return hashlib.sha256(keyed.encode("utf-8")).hexdigest()[:12]
 
 
 def _diagram_path(source: str) -> Path:
@@ -200,20 +227,25 @@ def _render_svg(source: str, destination: Path) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         mmd = Path(tmp) / "diagram.mmd"
         mmd.write_text(source, encoding="utf-8")
+        command = [
+            npx,
+            "-y",
+            _MERMAID_CLI,
+            "--input",
+            str(mmd),
+            "--output",
+            str(destination),
+            "--outputFormat",
+            "svg",
+            "--backgroundColor",
+            "transparent",
+        ]
+        # The layout config that fixes label overlap (see _MERMAID_CONFIG). Passed
+        # only when present, so the renderer still works if it is ever removed.
+        if _MERMAID_CONFIG.is_file():
+            command += ["--configFile", str(_MERMAID_CONFIG)]
         result = subprocess.run(
-            [
-                npx,
-                "-y",
-                _MERMAID_CLI,
-                "--input",
-                str(mmd),
-                "--output",
-                str(destination),
-                "--outputFormat",
-                "svg",
-                "--backgroundColor",
-                "transparent",
-            ],
+            command,
             capture_output=True,
             text=True,
             check=False,

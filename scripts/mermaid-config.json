@@ -1,0 +1,5 @@
+{
+  "flowchart": { "nodeSpacing": 60, "rankSpacing": 70, "padding": 14, "useMaxWidth": true },
+  "state": { "nodeSpacing": 60, "rankSpacing": 90, "edgeLengthFactor": "35", "padding": 14, "useMaxWidth": true },
+  "sequence": { "useMaxWidth": true }
+}
