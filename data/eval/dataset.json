@@ -1,0 +1,42 @@
+[
+  {
+    "query": "How long is the rollback window kept open after a blue/green cutover?",
+    "relevant_document_ids": ["deployments.md"],
+    "note": "deployments.md is the only document that defines a blue/green cutover and states the one-hour rollback window; the terms 'rollback window' and 'cutover' appear nowhere else in the corpus."
+  },
+  {
+    "query": "Should I redeploy the old build from source to roll back a release?",
+    "relevant_document_ids": ["deployments.md"],
+    "note": "deployments.md's 'Rolling back' section explicitly says not to redeploy the old build from source; 'redeploy from source' is unique to this document, disambiguating it from incident-response.md, which also mentions rolling back."
+  },
+  {
+    "query": "What severity is a service that returns wrong data to customers?",
+    "relevant_document_ids": ["incident-response.md"],
+    "note": "incident-response.md is the only document defining severity levels; it states wrong data is Sev 1. 'Severity' and 'Sev 1' appear only here."
+  },
+  {
+    "query": "What is the job of the incident commander during an incident?",
+    "relevant_document_ids": ["incident-response.md"],
+    "note": "incident-response.md's 'During an incident' section defines the incident commander role; the term 'incident commander' is unique to this document."
+  },
+  {
+    "query": "Is it ever acceptable to put credentials or tokens in a log line?",
+    "relevant_document_ids": ["observability.md"],
+    "note": "observability.md's 'What never goes in a log' section forbids credentials/tokens/personal data in logs. code-review.md mentions secrets in code, but the log-specific rule (credentials AND tokens AND log) is distinctive to observability.md."
+  },
+  {
+    "query": "Should alerts fire on high CPU usage or on symptoms customers feel?",
+    "relevant_document_ids": ["observability.md"],
+    "note": "observability.md's 'Alerting' section says to alert on symptoms not causes, using 'CPU above 80%' as the bad-alert example; 'alert', 'CPU' and 'symptoms' co-occur only here."
+  },
+  {
+    "query": "How small should a pull request diff be to review it well?",
+    "relevant_document_ids": ["code-review.md"],
+    "note": "code-review.md's 'For the author' section argues for small diffs (the fifty-line vs thousand-line diff); 'diff', 'reviewer' and the small-change argument are unique to this document."
+  },
+  {
+    "query": "What kinds of problem must block a code review from being approved?",
+    "relevant_document_ids": ["code-review.md"],
+    "note": "code-review.md has an explicit 'What must block' section (correctness defect, a secret, a swallowed error, a missing test); 'must block' and the reviewer framing are unique to this document."
+  }
+]

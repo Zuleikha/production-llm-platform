@@ -1,0 +1,10 @@
+{
+  "metrics": {
+    "mrr": 1.0,
+    "recall_at_k": 1.0
+  },
+  "k": 3,
+  "tolerance": 0.05,
+  "notes": "Last-accepted Tier 1 (deterministic, offline-hash) retrieval scores over data/eval/dataset.json. A run FAILS the CI gate if recall_at_k or mrr drops below its value minus tolerance (floor 0.95). The Tier 1 pipeline is fully deterministic, so tolerance absorbs only float noise, not real variance; it exists so the gate mechanism is correct the moment a non-deterministic (e.g. Voyage-backed) tier is added. Updating these numbers is a deliberate, reviewed human change (confirm the gain is real) - a passing run never rewrites this file. See ADR 0017.",
+  "generated_by": "uv run python scripts/evaluate.py --update-baseline"
+}

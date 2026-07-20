@@ -3,24 +3,24 @@
 Read at the start of every session. Keep under ~150 lines. Facts only — rationale
 lives in `docs/adr/`.
 
-## Current state — **Stage 5 of 10 (Observability), COMPLETE.** Version `0.1.0`
+## Current state — **Stage 6 of 10 (MLOps), COMPLETE.** Version `0.1.0`
 
 `POST /v1/chat/completions` runs a **real LangGraph agent loop against the Anthropic
 API** (`claude-opus-4-8`): reason → tool → observe → answer, bounded by `agent_max_steps`;
-real token usage summed across calls. History persists to Postgres behind a Redis cache
-with a `conversation_id`, else stateless (Stage 2). **Stage 4 grounds answers:** corpus
-(`data/corpus/`) ingested (LlamaIndex → Voyage → **Qdrant**); a `document_search` tool
-retrieves passages, response gains top-level **`citations`** — retrieval is one more `Tool`,
-routes/SSE/`CompletionEngine`/`LLMClient` **unchanged**. **Stage 5 gives `@traced` a real
-backend:** every call site now emits an **OpenTelemetry span** (+ its DEBUG log), plus a
-FastAPI request root span → OTLP/HTTP → **OTel Collector → Tempo** (Grafana datasource);
-**no call site changed**. Grafana dashboard + symptom alerts as code; metrics stay on
-Prometheus (traces only, ADR 0016). **No auth** — stub (Stage 8).
+real usage summed across calls. History persists to Postgres behind a Redis cache with a
+`conversation_id`, else stateless. **Stage 4 grounds answers:** corpus (`data/corpus/`)
+ingested (LlamaIndex → Voyage → **Qdrant**); `document_search` retrieves passages, response
+gains top-level **`citations`** — retrieval is one more `Tool`, routes/SSE/`CompletionEngine`/
+`LLMClient` **unchanged**. **Stage 5:** every `@traced` site emits an **OTel span** + a FastAPI
+root span → OTLP/HTTP → **Collector → Tempo**; Grafana dashboard + symptom alerts as code;
+metrics stay on Prometheus (traces only, ADR 0016). **Stage 6:** `Evaluator` implemented — RAG
+eval via `scripts/evaluate.py` (operator/CI, **not a boot hook**): **Tier 1** recall@k/MRR over
+offline-hash embeddings + in-memory cosine = **required hermetic CI regression gate** vs
+`data/eval/baseline.json`; **Tier 2** LLM-as-judge opt-in/billable, never CI (ADR 0017). **No
+auth** — stub (Stage 8).
 
-Roadmap **`docs/PROJECT_STATUS.md`** (canonical). Detail `docs/stage-summaries/stage-0{1..5}.md`.
-Rationale **`docs/adr/`** 0001-0016: stack · structure · config · streaming · pooling · agent
-loop · migrations · caching · hermetic LLM · diagrams · embeddings/Voyage · Qdrant · citations ·
-injection · live contract test · **observability stack**.
+Roadmap **`docs/PROJECT_STATUS.md`** (canonical). Detail `docs/stage-summaries/stage-0{1..6}.md`.
+Rationale **`docs/adr/`** 0001-0017 (index in `docs/adr/README.md`); 0017 = RAG eval + gate.
 
 ## Layout
 
@@ -32,8 +32,9 @@ services/orchestrator/  base.py · graph.py (LangGraph) · llm.py (LLMClient) ·
 services/retrieval/  embeddings.py (seam) · store.py (Qdrant) · ingest.py · retriever.py ·
                  tool.py (document_search — injection boundary)
 services/monitoring/  tracing.py (build_tracer_provider seam · OTLP/Local providers) · base.py (SpanExporter=OTel's)
-services/{evaluation,security}/  ⬜ stubs · shared/  config · logging · observability (@traced: OTel API only) · datastores · migrations · version
-data/corpus/  RAG corpus, loaded by scripts/ingest.py · migrations/  NNNN_name.sql forward-only, in lifespan · tests/ mirrors source
+services/evaluation/  metrics · dataset · retrieval (RetrievalEvaluator · InMemoryCosineStore) · baseline · judge · services/security/  ⬜ stub
+shared/  config · logging · observability (@traced) · datastores · migrations · version
+data/corpus/  RAG corpus (scripts/ingest.py) · data/eval/  dataset.json + baseline.json (scripts/evaluate.py) · migrations/  NNNN_name.sql forward-only · tests/ mirrors source
 docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.md
 ```
 
@@ -57,9 +58,8 @@ docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.
   `build_tracer_provider`. Guard keys on the *profile*, not the key's absence. `test` gets a
   `LocalTracerProvider` (real spans, never leave process); tracing is **not** a `prod` boot req —
   unset `OTEL_EXPORTER_OTLP_ENDPOINT` runs untraced and logs it (ADR 0005/0016).
-- **No sampling params.** Claude Opus 4.7+ **rejects `temperature`/`top_p`/`top_k` with a
-  400**; `budget_tokens` gone (use `thinking={"type":"adaptive"}`). `max_tokens` **required**.
-  `ChatCompletionRequest.temperature` accepted for wire compat, **not forwarded**.
+- **No sampling params.** Opus 4.7+ **rejects `temperature`/`top_p`/`top_k` (400)**; `budget_tokens`
+  gone (use `thinking={"type":"adaptive"}`). `max_tokens` **required**; `ChatCompletionRequest.temperature` kept for wire compat, **not forwarded**.
 - **Agent:** routes call the `CompletionEngine` on `app.state.engine`; `create_app(...,
   engine=...)` overrides it (stops the lifespan rebuilding it). `ToolRegistry.default()` = 3
   offline tools; `document_search` added via `with_tools` when Qdrant is up. `Tool.run` is
@@ -69,6 +69,7 @@ docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.
   chunk id (server rejects arbitrary strings; re-ingest idempotent). **Retrieved text is
   untrusted** — `document_search` nonce-fences excerpts; citations are typed, never parsed from
   text. Delimiting ≠ immunity (Stage 8); widening the corpus changes the threat model.
+- **Eval (ADR 0017):** RAG retrieval only. Tier 1 recall@k/MRR = **hermetic CI gate** vs `data/eval/baseline.json` (**never lower to pass**); Tier 2 judge billable, opt-in, never CI.
 - **Persistence:** Postgres is source of truth, Redis only caches. Writes **invalidate**
   (Postgres first, then `DELETE`) — never rewrite. A Redis failure degrades to a Postgres
   read: the **one** sanctioned exception to fail-loud (ADR 0008). Migrations are plain SQL,
@@ -106,6 +107,7 @@ export ANTHROPIC_API_KEY=sk-ant-... ; export VOYAGE_API_KEY=pa-...   # real call
 uv run uvicorn services.api.app:app --reload   # API only  -> :8000
 docker compose up -d --build                   # full stack
 uv run python scripts/ingest.py                # ingest corpus -> Qdrant (costs $ outside test)
+uv run python scripts/evaluate.py              # Tier 1 RAG eval + CI regression gate (hermetic)
 pwsh scripts/verify.ps1   # or ./scripts/verify.sh — the whole gate (ruff · format · mypy · pytest)
 uv run python scripts/build_architecture.py   # regenerate architecture.html (needs npx for diagrams)
 ```
@@ -132,9 +134,8 @@ Endpoints: `/health` `/ready` `/version` `/metrics` `/docs` · `POST /v1/chat/co
 
 | Stage | Deferred |
 |:--:|---|
-| 6 | Evaluation (`Evaluator`), MLOps pipelines · **OTel metrics** export (traces-only shipped, ADR 0016) |
 | 7 | K8s manifests, Terraform · **8** Auth, guardrails, rate limiting, RAG injection hardening — **API unauthenticated** |
-| 9 | Load/chaos testing, SLOs, pool tuning, circuit breaking, prompt caching, context compaction · **10** Portfolio polish |
+| 9 | Load/chaos testing, SLOs, **OTel metrics export** (traces-only shipped, ADR 0016), pool tuning, circuit breaking, prompt caching, context compaction · **10** Portfolio polish |
 
 ## Known issues
 
@@ -145,5 +146,4 @@ Endpoints: `/health` `/ready` `/version` `/metrics` `/docs` · `POST /v1/chat/co
 - **No per-conversation concurrency control** — two concurrent turns on one `conversation_id`
   collide on `(conversation_id, position)`; the second fails loudly, not serialised (ADR 0008).
 - **Editing a doc shorter orphans its tail chunks** in Qdrant — ingestion is upsert-only (ADR 0012).
-- **The hermetic suite cannot catch a wrong assumption about the real APIs** — the fakes
-  encode our beliefs. Run the opt-in live contract test (ADR 0015) when changing `llm.py`/`embeddings.py`.
+- **Hermetic suite can't catch a wrong belief about the real APIs** — run the opt-in live contract test (ADR 0015) when changing `llm.py`/`embeddings.py`.

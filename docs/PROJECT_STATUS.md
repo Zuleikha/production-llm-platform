@@ -6,13 +6,13 @@ Every stage prompt references this file. Update it at the end of each stage.
 | | |
 |---|---|
 | **Current version** | `0.1.0` |
-| **Current stage** | Stage 5 — Observability (**complete**) |
-| **Overall progress** | **5 / 10 stages — 50%** |
-| **Next milestone** | Stage 6 — MLOps |
-| **Last updated** | 2026-07-18 |
+| **Current stage** | Stage 6 — MLOps (**complete**) |
+| **Overall progress** | **6 / 10 stages — 60%** |
+| **Next milestone** | Stage 7 — Kubernetes |
+| **Last updated** | 2026-07-20 |
 
 ```
-Progress  [█████─────]  5/10
+Progress  [██████────]  6/10
 ```
 
 ---
@@ -84,12 +84,12 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
 | 3 | Agents | [stage-03-agents.md](stage-summaries/stage-03-agents.md) | [stage-03-agents.md](verification-log/stage-03-agents.md) | 2026-07-15 |
 | 4 | RAG | [stage-04-rag.md](stage-summaries/stage-04-rag.md) | [stage-04-rag.md](verification-log/stage-04-rag.md) | 2026-07-16 |
 | 5 | Observability | [stage-05-observability.md](stage-summaries/stage-05-observability.md) | _pending independent verification_ | 2026-07-18 |
+| 6 | MLOps | [stage-06-mlops.md](stage-summaries/stage-06-mlops.md) | _pending independent verification_ | 2026-07-20 |
 
 ## Remaining stages
 
 | Stage | Name | Summary file (fixed) | Objective |
 |:-----:|------|----------------------|-----------|
-| 6 | MLOps | `stage-06-mlops.md` | Evaluation (`Evaluator`), eval datasets, LLM-as-judge, regression gates in CI, pipelines |
 | 7 | Kubernetes | `stage-07-kubernetes.md` | K8s manifests/Helm (probes → `/health`, `/ready`), Terraform provisioning |
 | 8 | Security | `stage-08-security.md` | AuthN/AuthZ, input/output guardrails, rate limiting, secret management, security scanning |
 | 9 | Reliability | `stage-09-reliability.md` | Load testing, chaos/failure testing, SLOs, resilience patterns |
@@ -168,19 +168,31 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
 - **Docker Compose stack** — api (multi-stage, **non-root** uid 1001), postgres,
   redis, qdrant, prometheus, grafana (datasources provisioned as code), plus
   **otel-collector** and **tempo** (traces, Stage 5).
-- **Quality gate** — ruff, ruff-format, mypy `strict`, pytest (273 tests, plus
+- **RAG evaluation + CI regression gate (Stage 6)** — `services/evaluation` scores
+  the retrieval pipeline against a checked-in dataset (`data/eval/`) via an
+  operator/CI script (`scripts/evaluate.py`, never a boot hook). **Tier 1**
+  (deterministic recall@k / MRR over the offline-hash embeddings and an in-memory
+  cosine store) is hermetic, key-free, and a **required CI job** that fails the
+  build when a score drops below the checked-in baseline minus tolerance. **Tier 2**
+  (LLM-as-judge: faithfulness + citation accuracy) is opt-in, billable, and never
+  in CI — same double opt-in as the live contract test (ADR 0015, 0017).
+- **Quality gate** — ruff, ruff-format, mypy `strict`, pytest (311 tests, plus
   opt-in live-datastore / live-Qdrant / live-provider layers that skip by
-  default), pre-commit; GitHub Actions runs all of it plus a Docker build against
-  live postgres/redis/qdrant service containers, asserting `/ready` reports every
-  store `ok` and that chat + SSE work.
+  default), pre-commit; GitHub Actions runs all of it plus the hermetic Tier 1
+  eval regression gate and a Docker build against live postgres/redis/qdrant
+  service containers, asserting `/ready` reports every store `ok` and that chat +
+  SSE work.
 
 ### ❌ Does not exist yet
 
 **No authentication** (the corpus and API are both unauthenticated) · no
-Kubernetes/Terraform · no evaluation · no load testing · **no OTel metrics
-pipeline** — the collector carries traces only and metrics stay on Prometheus
-(deliberate scope cut, ADR 0016), so Grafana's service-map / node-graph views are
-switched off rather than left empty.
+Kubernetes/Terraform · no load testing · **no OTel metrics pipeline** — the
+collector carries traces only and metrics stay on Prometheus (deliberate scope
+cut, ADR 0016), so Grafana's service-map / node-graph views are switched off
+rather than left empty; building that metrics-from-traces pipeline is deferred to
+Stage 9, which owns SLOs and needs it. Evaluation covers **RAG retrieval only**
+(ADR 0017) — agent tool-use and open-ended chat quality are out of scope, having
+no fixture corpus to grade against.
 
 All three datastores now hold real data — Postgres (conversation history), Redis
 (its cache), and **Qdrant (document vectors, new in Stage 4)**.
@@ -201,29 +213,32 @@ no endpoint returns a collection yet. Revisit when one does.
 
 ---
 
-## Next milestone — Stage 6 (MLOps)
+## Next milestone — Stage 7 (Kubernetes)
 
-**Objective:** an evaluation harness — the `Evaluator` seam, eval datasets,
-LLM-as-judge scoring, and regression gates wired into CI.
+**Objective:** deployment manifests — K8s/Helm with readiness/liveness probes
+wired to `/ready` and `/health`, and Terraform provisioning.
 
-Expected scope:
+**Prerequisites** (all met as of Stage 6): honest `/health` vs `/ready` probes
+(the kubelet's readiness probe is what finally arms the `/ready` alert, ADR 0016),
+the Docker image already built and boot-verified in CI, and a hermetic quality
+gate — now including a RAG regression gate — that a deployment pipeline can lean on.
 
-1. `services/evaluation` — implement the `Evaluator` ABC (currently a stub that
-   raises); offline eval over a fixed dataset.
-2. LLM-as-judge scoring, hermetic by the same construction as the chat path
-   (ADR 0009) — the `test` profile cannot call a real model.
-3. Regression gates in CI: a scored eval that fails the build when quality drops.
-
-**Prerequisites** (all met as of Stage 5): the `CompletionEngine` seam, real
-distributed tracing to correlate an eval run's spans, and the hermetic-provider
-pattern (ADR 0009/0011/0016) to extend to a judge.
+**Resolved in Stage 6:** the `Evaluator` stub is implemented (ADR 0017). The RAG
+retrieval pipeline has a two-tier harness run by `scripts/evaluate.py`: a hermetic,
+deterministic **Tier 1** (recall@k / MRR over offline-hash embeddings + an
+in-memory cosine store) wired into CI as a required regression gate against a
+checked-in baseline, and an opt-in, billable **Tier 2** LLM-as-judge (faithfulness
++ citation accuracy) that never runs in CI (same double opt-in as ADR 0015). The
+`CLAUDE.md` deferred-table inconsistency was fixed at the same time: **OTel metrics
+export moved from Stage 6 to Stage 9**, which owns SLOs and actually needs it —
+Stage 6 was always MLOps/eval only per this file.
 
 **Resolved in Stage 5:** the `@traced` seam now has a real OpenTelemetry backend
 (spans → OTel Collector → Tempo, ADR 0016), with the profile-keyed hermetic guard
 extended to the collector as a third external hop. Grafana dashboards and
 symptom-level alerting are provisioned as code. Metrics export through OTel was
 **deliberately not built** — the collector carries traces only, Prometheus keeps
-`/metrics` (ADR 0016).
+`/metrics` (ADR 0016); it is now explicitly a Stage 9 item.
 
 **Resolved in Stage 4 (was carried forward from Stage 3):** the missing contract
 test against the real external APIs. Stage 4 added an opt-in, double-gated live

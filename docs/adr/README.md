@@ -29,6 +29,7 @@ Every ADR uses: **Context** (the forces at play) → **Decision** (what we chose
 | [0014](0014-prompt-injection-mitigation.md) | Prompt-injection mitigation for retrieved document text | Accepted | 4 |
 | [0015](0015-live-provider-contract-test.md) | An opt-in live contract test for both external providers | Accepted | 4 |
 | [0016](0016-observability-stack.md) | Observability stack: OTel traces → Collector → Tempo, Grafana-native alerting | Accepted | 5 |
+| [0017](0017-rag-evaluation-and-regression-gate.md) | RAG evaluation: recall@k/MRR, CI-vs-opt-in two-tier split, regression baseline | Accepted | 6 |
 
 ## Conventions
 

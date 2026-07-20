@@ -38,7 +38,7 @@ tracing without touching any of it.
 
 ---
 
-## Current state (Stage 5 — built and verified)
+## Current state (Stage 6 — built and verified)
 
 ### Component map
 
@@ -439,11 +439,35 @@ Prometheus + three Tempo trace tables) and three symptom-level alert rules
 (error rate > 5%, chat p99 > 30s, `/ready` 503) via Grafana-native unified
 alerting — no Alertmanager container (ADR 0016).
 
+### Evaluation and the regression gate (Stage 6)
+
+The RAG retrieval pipeline has a real evaluation harness (`services/evaluation/`,
+ADR 0017), run as an operator/CI script — `scripts/evaluate.py`, the same shape as
+`scripts/ingest.py`, **never a service boot hook**. It has two tiers, split on the
+same line ADR 0009/0011 draw: what cannot spend money blocks the build; what can,
+never does.
+
+- **Tier 1 — deterministic retrieval metrics (recall@k, MRR).** The `RetrievalEvaluator`
+  grades a checked-in dataset (`data/eval/dataset.json`, query → expected
+  document) over the shipped corpus using the **offline-hash embeddings** (ADR
+  0011) and an in-memory brute-force **cosine store** — no Qdrant, no Voyage, no
+  key, no network. It exits non-zero when a score drops below the checked-in
+  baseline (`data/eval/baseline.json`) minus a tolerance. **This is a required,
+  hermetic CI job (the `eval` job)** — the regression gate.
+- **Tier 2 — LLM-as-judge** (answer faithfulness, citation accuracy). Real,
+  billable Anthropic calls, so it is opt-in and double-gated exactly like the live
+  contract test (ADR 0015): `RUN_LLM_JUDGE=1` **and** a key, built from a
+  non-`test` profile, **never in CI**. Advisory — it does not gate.
+
+The baseline is human-owned: a passing run never rewrites it, and raising the bar
+is a deliberate `--update-baseline` action someone reviews (ADR 0017).
+
 ### Quality gate
 
-ruff (lint + format) · mypy `strict` · pytest (273 tests, plus opt-in
+ruff (lint + format) · mypy `strict` · pytest (311 tests, plus opt-in
 live-datastore, live-Qdrant and live-provider layers that skip by default) ·
-pre-commit · GitHub Actions running the same commands, **plus** a Docker job that
+pre-commit · GitHub Actions running the same commands, **plus** the hermetic
+Tier 1 eval regression gate (above) as a required job, **plus** a Docker job that
 boots the container against live postgres/redis/qdrant service containers and
 fails unless `/ready` reports every store `ok` and the chat + SSE contract holds.
 
@@ -463,19 +487,21 @@ builds it.
 
 | Component | Stage | Status today |
 |-----------|-------|--------------|
-| `services/evaluation` — `Evaluator` ABC | 6 | **Not implemented.** Raises. |
 | `infrastructure/kubernetes`, `infrastructure/terraform` | 7 | **Empty placeholders.** Compose only today. |
 | `services/security` — `AuthProvider`, `Guardrail` | 8 | **Not implemented.** API is entirely unauthenticated. |
-| Reliability — load testing, chaos, SLOs, pool tuning, reconnect/circuit breaking | 9 | **Nothing exists.** |
+| Reliability — load testing, chaos, SLOs, pool tuning, reconnect/circuit breaking, **OTel metrics export** | 9 | **Nothing exists.** |
 
-### Deliberate non-goals as of Stage 5
+### Deliberate non-goals as of Stage 6
 
 **No authentication** (the corpus and the API are both unauthenticated — Stage 8),
-no evaluation, no Kubernetes. **Metrics are not exported through the OTel
-collector** — the collector carries traces only, and metrics stay on Prometheus
-scraping `/metrics` (a deliberate scope cut, ADR 0016), so Grafana's service-map
-and node-graph views are switched off rather than left rendering "No data".
-Pagination conventions are still deferred — no endpoint returns a collection yet.
+no Kubernetes. **Metrics are not exported through the OTel collector** — the
+collector carries traces only, and metrics stay on Prometheus scraping `/metrics`
+(a deliberate scope cut, ADR 0016), so Grafana's service-map and node-graph views
+are switched off rather than left rendering "No data"; building that metrics-from-
+traces pipeline is deferred to Stage 9, which owns SLOs and actually needs it.
+Evaluation covers **RAG retrieval only** (ADR 0017) — not agent tool-use or
+open-ended chat quality, which have no fixture corpus to grade against. Pagination
+conventions are still deferred — no endpoint returns a collection yet.
 
 Retrieval itself is deliberately minimal: no reranking, no hybrid (keyword +
 vector) search, no query expansion, and no automatic re-ingestion — ingestion is
@@ -550,4 +576,5 @@ unauthenticated** — that is Stage 8.
 - [ADR 0014 — Prompt-injection mitigation for retrieved text](adr/0014-prompt-injection-mitigation.md)
 - [ADR 0015 — Opt-in live provider contract test](adr/0015-live-provider-contract-test.md)
 - [ADR 0016 — Observability stack: OTel traces → Collector → Tempo, Grafana-native alerting](adr/0016-observability-stack.md)
+- [ADR 0017 — RAG evaluation, recall@k/MRR, and the regression gate](adr/0017-rag-evaluation-and-regression-gate.md)
 - [PROJECT_STATUS.md](PROJECT_STATUS.md) — roadmap and progress
