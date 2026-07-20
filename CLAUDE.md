@@ -3,24 +3,24 @@
 Read at the start of every session. Keep under ~150 lines. Facts only — rationale
 lives in `docs/adr/`.
 
-## Current state — **Stage 4 of 10 (RAG), COMPLETE.** Version `0.1.0`
+## Current state — **Stage 5 of 10 (Observability), COMPLETE.** Version `0.1.0`
 
 `POST /v1/chat/completions` runs a **real LangGraph agent loop against the Anthropic
-API** (`claude-opus-4-8`): reason → tool → observe → answer, bounded by
-`agent_max_steps`. Real token usage summed across model calls. History persists to
-Postgres behind a Redis cache when a `conversation_id` is sent; else stateless as in
-Stage 2. **Stage 4 grounds answers:** a corpus (`data/corpus/`) is ingested
-(LlamaIndex chunking → Voyage embeddings → **Qdrant, now holding data**); a
-`document_search` tool retrieves passages and the response gains a top-level
-**`citations`** field. Routes, SSE format, `CompletionEngine`/`LLMClient` seams
-**unchanged** — retrieval is one more `Tool`. **No auth** — stub (Stage 8).
+API** (`claude-opus-4-8`): reason → tool → observe → answer, bounded by `agent_max_steps`;
+real token usage summed across calls. History persists to Postgres behind a Redis cache
+with a `conversation_id`, else stateless (Stage 2). **Stage 4 grounds answers:** corpus
+(`data/corpus/`) ingested (LlamaIndex → Voyage → **Qdrant**); a `document_search` tool
+retrieves passages, response gains top-level **`citations`** — retrieval is one more `Tool`,
+routes/SSE/`CompletionEngine`/`LLMClient` **unchanged**. **Stage 5 gives `@traced` a real
+backend:** every call site now emits an **OpenTelemetry span** (+ its DEBUG log), plus a
+FastAPI request root span → OTLP/HTTP → **OTel Collector → Tempo** (Grafana datasource);
+**no call site changed**. Grafana dashboard + symptom alerts as code; metrics stay on
+Prometheus (traces only, ADR 0016). **No auth** — stub (Stage 8).
 
-Roadmap **`docs/PROJECT_STATUS.md`** (canonical). Detail
-`docs/stage-summaries/stage-0{1-foundation,2-api,3-agents,4-rag}.md`. Rationale
-**`docs/adr/`**: 0001 stack · 0002 structure · 0003 config · 0004 streaming · 0005
-pooling · 0006 agent loop · 0007 migrations · 0008 caching · 0009 hermetic LLM · 0010
-diagrams · 0011 embeddings/Voyage · 0012 Qdrant · 0013 citations · 0014 injection ·
-0015 live contract test.
+Roadmap **`docs/PROJECT_STATUS.md`** (canonical). Detail `docs/stage-summaries/stage-0{1..5}.md`.
+Rationale **`docs/adr/`** 0001-0016: stack · structure · config · streaming · pooling · agent
+loop · migrations · caching · hermetic LLM · diagrams · embeddings/Voyage · Qdrant · citations ·
+injection · live contract test · **observability stack**.
 
 ## Layout
 
@@ -31,10 +31,9 @@ services/agents/ base.py (Agent · ToolAgent) · tools.py (registry, 3 offline t
 services/orchestrator/  base.py · graph.py (LangGraph) · llm.py (LLMClient) · conversations.py
 services/retrieval/  embeddings.py (seam) · store.py (Qdrant) · ingest.py · retriever.py ·
                  tool.py (document_search — injection boundary)
-services/{evaluation,monitoring,security}/  ⬜ stubs
-shared/          config · logging · observability · datastores · migrations · version
-data/corpus/     RAG corpus (generic engineering .md); scripts/ingest.py loads it
-migrations/      NNNN_name.sql forward-only, applied in lifespan · tests/ mirrors source
+services/monitoring/  tracing.py (build_tracer_provider seam · OTLP/Local providers) · base.py (SpanExporter=OTel's)
+services/{evaluation,security}/  ⬜ stubs · shared/  config · logging · observability (@traced: OTel API only) · datastores · migrations · version
+data/corpus/  RAG corpus, loaded by scripts/ingest.py · migrations/  NNNN_name.sql forward-only, in lifespan · tests/ mirrors source
 docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.md
 ```
 
@@ -52,10 +51,12 @@ docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.
   `not_configured`, never dialled. `startup()` concurrent and **never raises** — failures
   surface on `/ready`, not a crash loop. `/health` must **never** probe (tripwire). Qdrant
   uses `qdrant-client` (probe = `get_collections()`).
-- **Paid-provider seams — read ADR 0009/0011 first:** the `test` profile **cannot
-  construct** `AnthropicClient` *or* `VoyageEmbeddingsClient`; each raises before its key
-  is read. Go via `build_llm_client` / `build_embeddings_client`. The guard keys on the
-  *profile*, not the key's absence, so a dev with keys exported gets CI's hermetic suite.
+- **Hermetic external-hop seams — read ADR 0009/0011/0016 first:** the `test` profile **cannot
+  construct** `AnthropicClient`, `VoyageEmbeddingsClient`, *or* `OTLPTracerProvider` (each raises
+  before its endpoint/key is read). Go via `build_llm_client`/`build_embeddings_client`/
+  `build_tracer_provider`. Guard keys on the *profile*, not the key's absence. `test` gets a
+  `LocalTracerProvider` (real spans, never leave process); tracing is **not** a `prod` boot req —
+  unset `OTEL_EXPORTER_OTLP_ENDPOINT` runs untraced and logs it (ADR 0005/0016).
 - **No sampling params.** Claude Opus 4.7+ **rejects `temperature`/`top_p`/`top_k` with a
   400**; `budget_tokens` gone (use `thinking={"type":"adaptive"}`). `max_tokens` **required**.
   `ChatCompletionRequest.temperature` accepted for wire compat, **not forwarded**.
@@ -74,9 +75,10 @@ docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.
   forward-only, advisory-locked.
 - **Logging:** `get_logger(__name__)`; log **events** not sentences —
   `_logger.info("http.request", extra={...})`. One JSON object/line. Never log
-  PII/secrets/tokens (nor queries/excerpts — attacker-influenced). **Tracing:** `@traced` on new
-  app functions; **exempt:** `shared/{logging,observability}.py` (recursion), async
-  generators/lifespan, LangGraph nodes.
+  PII/secrets/tokens (nor queries/excerpts — attacker-influenced). **Tracing (ADR 0016):**
+  `@traced` on new app functions → OTel span carrying **only** `code.function`/`code.namespace`
+  (read at decoration, never call data); error status = exception **type name** only. **Exempt:**
+  `shared/{logging,observability}.py` (recursion), async generators/lifespan, LangGraph nodes.
 - **Errors:** fail loud. Envelope `{"error": {type, message, request_id}}`; 500s never leak
   internals. Handlers on **Starlette's** `HTTPException`.
 - **Types:** mypy `strict`, everything annotated incl. tests. Narrow with `isinstance` not
@@ -88,14 +90,13 @@ docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.
   `TEST_DATABASE_URL`/`TEST_REDIS_URL`, `TEST_QDRANT_URL`, `RUN_LIVE_CONTRACT_TESTS=1` + keys.
 - **Ending a stage:** `docs/contributing.md` → "Ending a stage" is **canonical** and lists **six**
   required updates — do all six before committing. **README is one** (it drifts silently).
-- **Container boot is required, not deferrable.** Before self-report, `docker build` and run
-  the image in **both** `prod` and `test` profiles, and curl the stage's endpoints. A green
-  `pytest` does not prove the container boots: Stage 3 deferred this and CI caught two failures
-  a 2-min local boot catches (`docs/verification-log/stage-03-agents.md`).
-- **Architecture doc:** `docs/architecture.md` is the source; `architecture.html` is **generated**
-  by `scripts/build_architecture.py` — never edit it (a test fails on drift). Diagrams: pre-rendered
-  **SVG** in `docs/diagrams/`, no CDN/JS (ADR 0010); rendering needs Node/`npx`, building +
-  `--check` only Python. A Mermaid keyword (`graph`, `end`) as a node id fails the render.
+- **Container boot is required, not deferrable.** Before self-report, `docker build` + run in
+  **both** `prod` and `test` profiles and curl the endpoints — a green `pytest` does not prove
+  the container boots (Stage 3 deferred it; CI caught two failures a 2-min local boot catches).
+- **Architecture doc:** `docs/architecture.md` is source; `architecture.html` is **generated** by
+  `scripts/build_architecture.py` — never edit it (a test fails on drift). Diagrams: pre-rendered
+  **SVG** in `docs/diagrams/`, no CDN/JS (ADR 0010); rendering needs Node/`npx`, build + `--check`
+  only Python. A Mermaid keyword (`graph`, `end`) as a node id fails the render.
 
 ## Run / test / lint
 
@@ -106,12 +107,11 @@ uv run uvicorn services.api.app:app --reload   # API only  -> :8000
 docker compose up -d --build                   # full stack
 uv run python scripts/ingest.py                # ingest corpus -> Qdrant (costs $ outside test)
 pwsh scripts/verify.ps1   # or ./scripts/verify.sh — the whole gate (ruff · format · mypy · pytest)
-uv run python scripts/build_architecture.py   # regenerate (needs npx for diagrams)
-docker build -t plp/api:local . && docker run -d -p 8010:8000 -e ENVIRONMENT=test plp/api:local
+uv run python scripts/build_architecture.py   # regenerate architecture.html (needs npx for diagrams)
 ```
 
 Endpoints: `/health` `/ready` `/version` `/metrics` `/docs` · `POST /v1/chat/completions`
-(`"stream": true` SSE; optional `conversation_id`; response has `citations`). Grafana :3001.
+(`"stream": true` SSE; optional `conversation_id`; `citations`). Grafana :3001 · Tempo :3200 · Collector :4317/:4318.
 
 ## Known environment quirks — this machine, not the code
 
@@ -132,15 +132,14 @@ Endpoints: `/health` `/ready` `/version` `/metrics` `/docs` · `POST /v1/chat/co
 
 | Stage | Deferred |
 |:--:|---|
-| 5 | OTel export, Grafana dashboards, alerting · **6** Evaluation (`Evaluator`), MLOps pipelines |
+| 6 | Evaluation (`Evaluator`), MLOps pipelines · **OTel metrics** export (traces-only shipped, ADR 0016) |
 | 7 | K8s manifests, Terraform · **8** Auth, guardrails, rate limiting, RAG injection hardening — **API unauthenticated** |
 | 9 | Load/chaos testing, SLOs, pool tuning, circuit breaking, prompt caching, context compaction · **10** Portfolio polish |
 
 ## Known issues
 
-- Starlette 1.3.1 deprecates `httpx` for `TestClient` (warning only). 422 stringifies
-  Pydantic's raw error list into `message`. `config/environments/*.env` can drift from
-  `.env.example`. A datastore failing `connect` at boot stays `unavailable` until restart.
+- Starlette 1.3.1 deprecates `httpx` for `TestClient` (warning only). 422 stringifies Pydantic's
+  raw error list into `message`. A datastore failing `connect` at boot stays `unavailable` until restart.
 - **`/ready` does not check schema version** — a failed migration leaves the service
   reporting ready while every chat query fails (ADR 0007).
 - **No per-conversation concurrency control** — two concurrent turns on one `conversation_id`

@@ -26,6 +26,7 @@ from services.api.completions import CompletionEngine, OrchestratorEngine
 from services.api.errors import register_exception_handlers
 from services.api.middleware import RequestContextMiddleware
 from services.api.routes import chat, health, meta
+from services.monitoring.tracing import configure_tracing, shutdown_tracing
 from services.orchestrator.base import AgentOrchestrator
 from services.orchestrator.conversations import build_conversation_store
 from services.orchestrator.graph import AgentGraph
@@ -100,6 +101,10 @@ def create_app(
             "service.startup",
             extra={"version": get_version(), "environment": settings.environment},
         )
+        # Before anything else worth tracing happens. Which provider this
+        # installs is decided by the profile, not by whether a collector answers
+        # — under `test` it cannot be the exporting one (ADR 0016).
+        app.state.tracer_provider = configure_tracing(settings, app)
         # startup() never raises: an unreachable datastore must surface on
         # /ready, not crash-loop the container. See ADR 0005.
         await app.state.datastores.startup()
@@ -111,6 +116,8 @@ def create_app(
         yield
         # --- shutdown hook ---
         await app.state.datastores.shutdown()
+        # Last: flushes the batch covering the shutdown itself.
+        shutdown_tracing(app.state.tracer_provider)
         _logger.info("service.shutdown", extra={"environment": settings.environment})
 
     app = FastAPI(

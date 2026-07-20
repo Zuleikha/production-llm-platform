@@ -1,6 +1,6 @@
-# Dashboard provider. Dashboards themselves are planned, not yet implemented
-# (Stage 5 — observability); this establishes the provisioning path so Stage 5
-# only needs to drop JSON dashboard files into ./dashboards.
+# Dashboard provider. Stage 1 established this path with no dashboards behind
+# it; Stage 5 dropped the JSON in (api-overview.json) — which is all it took,
+# because the provisioning entry was already right.
 apiVersion: 1
 
 providers:
@@ -10,6 +10,9 @@ providers:
     type: file
     disableDeletion: false
     updateIntervalSeconds: 30
+    # Dashboards are code: edits belong in the JSON, in git. A change made in
+    # the UI would be silently reverted on the next provisioning sweep, so
+    # Grafana is told to disallow it outright rather than let someone lose work.
     allowUiUpdates: false
     options:
       path: /etc/grafana/provisioning/dashboards

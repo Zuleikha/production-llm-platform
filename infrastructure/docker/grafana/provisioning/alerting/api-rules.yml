@@ -1,0 +1,182 @@
+# ---------------------------------------------------------------------------
+# Grafana unified alerting, provisioned as code. See ADR 0016.
+#
+# Grafana 11 ships unified alerting natively, so there is no Alertmanager
+# container here — one fewer moving part for the same result.
+#
+# SYMPTOM-LEVEL ONLY. Every rule below fires on something a *caller* would
+# notice: requests failing, requests slow, the service declaring itself unfit for
+# traffic. None of them fire on an internal (a pool at capacity, a cache miss
+# rate, a retry) — those are diagnosis, and they belong on the dashboard next to
+# the trace that explains them, not in a page at 3am.
+#
+# Thresholds are justified in each rule's `summary`/`description` annotation and
+# in the stage summary. They are starting points chosen from what this stack
+# actually does, not tuned against production traffic — Stage 9 (reliability)
+# owns SLOs and the load levels that would justify moving them.
+# ---------------------------------------------------------------------------
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: api-symptoms
+    folder: production-llm-platform
+    # Evaluated every minute; each rule's own `for` decides how long a breach
+    # must persist before it pages.
+    interval: 1m
+    rules:
+      # -------------------------------------------------------------------
+      - uid: api-error-rate
+        title: API error rate above 5%
+        condition: THRESHOLD
+        for: 5m
+        labels:
+          severity: critical
+          service: api
+        annotations:
+          summary: "More than 5% of API requests are returning 5xx."
+          description: >-
+            5% of requests failing is past the point where it could be one
+            unlucky client: at any real volume it means a dependency, the model
+            call or the code itself is broken for a slice of traffic. The 5m
+            `for` is what keeps a deploy blip or a datastore reconnect from
+            paging — a genuine incident stays broken for five minutes, a restart
+            does not. clamp_min on the denominator stops an idle service (rate =
+            0) from evaluating 0/0 and alerting on NaN.
+          runbook: "Open the 'Traces with errors' panel on the api-overview dashboard."
+        isPaused: false
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: RATE
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: RATE
+              instant: true
+              editorMode: code
+              expr: >-
+                sum(rate(http_requests_total{job="api", status=~"5.."}[5m]))
+                / clamp_min(sum(rate(http_requests_total{job="api"}[5m])), 0.001)
+          - refId: THRESHOLD
+            datasourceUid: __expr__
+            model:
+              refId: THRESHOLD
+              type: threshold
+              expression: RATE
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.05]
+
+      # -------------------------------------------------------------------
+      - uid: api-chat-p99-latency
+        title: Chat p99 latency above 30s
+        condition: THRESHOLD
+        for: 10m
+        labels:
+          severity: warning
+          service: api
+        annotations:
+          summary: "p99 latency on POST /v1/chat/completions is above 30 seconds."
+          description: >-
+            Scoped to the chat route on purpose. A p99 across all routes would be
+            diluted by /health (a 10s Docker healthcheck) and /metrics (a 15s
+            Prometheus scrape), both of which touch no datastore and return in
+            microseconds — they would mask the one endpoint a user waits on.
+            30s is deliberately generous rather than tight: a grounded answer
+            runs an agent loop of up to AGENT_MAX_STEPS (6) model calls, each
+            bounded by ANTHROPIC_TIMEOUT_SECONDS (60), so a slow-but-working
+            request legitimately takes seconds. 30s means the typical worst
+            request is burning half a single call's entire timeout budget, which
+            is outside normal even for a multi-step run. The 10m `for` matches
+            that: chat latency is naturally spiky, and a tighter window would
+            page on one slow model response. Warning, not critical — slow is a
+            degradation; failing is an outage.
+          runbook: "Open the 'Slowest chat traces (> 1s)' panel to see which span is eating the time."
+        isPaused: false
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: P99
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: P99
+              instant: true
+              editorMode: code
+              expr: >-
+                histogram_quantile(0.99, sum by (le) (rate(
+                  http_request_duration_seconds_bucket{job="api", path="/v1/chat/completions"}[5m]
+                )))
+          - refId: THRESHOLD
+            datasourceUid: __expr__
+            model:
+              refId: THRESHOLD
+              type: threshold
+              expression: P99
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [30]
+
+      # -------------------------------------------------------------------
+      - uid: api-not-ready
+        title: API reporting not_ready
+        condition: THRESHOLD
+        for: 2m
+        labels:
+          severity: critical
+          service: api
+        annotations:
+          summary: "/ready is returning 503 not_ready — a configured datastore is unavailable."
+          description: >-
+            Any occurrence, not a rate: /ready returning 503 is the service
+            declaring itself unfit for traffic, and one is already a problem —
+            there is no healthy background level of not_ready to threshold
+            against. The 2m `for` rides out a restart or a datastore reconnect
+            without paging, which matters because startup deliberately never
+            raises: an unreachable store yields an un-ready pod rather than a
+            crash loop (ADR 0005), and this alert is what makes that visible
+            instead of quietly un-routed.
+
+            KNOWN LIMITATION: this counts what /ready *told a caller*, which
+            means it only fires if something asks. Nothing in the compose stack
+            polls /ready today — the Docker healthcheck hits /health, which by
+            design never probes a dependency. So locally this rule is armed but
+            quiet unless you curl it. In Stage 7 the kubelet's readiness probe
+            polls it every few seconds and the rule works as written. Closing the
+            gap properly needs either a blackbox exporter (a third container
+            family ADR 0016 declined) or a readiness gauge on /metrics, which
+            would go stale for the same reason. Recorded rather than papered over.
+          runbook: "curl localhost:8000/ready — the JSON names which store is unavailable."
+        isPaused: false
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: NOTREADY
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: NOTREADY
+              instant: true
+              editorMode: code
+              expr: >-
+                sum(rate(http_requests_total{job="api", path="/ready", status="503"}[5m]))
+          - refId: THRESHOLD
+            datasourceUid: __expr__
+            model:
+              refId: THRESHOLD
+              type: threshold
+              expression: NOTREADY
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]

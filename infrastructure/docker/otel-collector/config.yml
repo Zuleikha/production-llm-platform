@@ -1,0 +1,55 @@
+# ---------------------------------------------------------------------------
+# OpenTelemetry Collector — TRACES ONLY. See ADR 0016.
+#
+# Metrics deliberately do not pass through here. The API exposes Prometheus
+# metrics on /metrics and Prometheus scrapes it directly (Stage 1); adding a
+# second, competing metrics pipeline through this collector would mean two
+# sources of truth for the same numbers, disagreeing at the edges. That is a
+# scope cut, not an oversight.
+# ---------------------------------------------------------------------------
+
+receivers:
+  otlp:
+    protocols:
+      # Both receivers are on, though the API only speaks http/protobuf
+      # (opentelemetry-exporter-otlp-proto-http). grpc costs nothing to leave
+      # listening and means a sidecar, a script or a future non-Python service
+      # can send traces without editing this file.
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Bounds the collector's own memory before it becomes the outage. Without it a
+  # Tempo stall backs spans up in here until the container is OOM-killed, and a
+  # dead collector is harder to diagnose than a lossy one.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 384
+    spike_limit_mib: 96
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      # Local compose network, not the public internet. Stage 7 (Kubernetes) is
+      # where this hop crosses a boundary that warrants TLS.
+      insecure: true
+
+service:
+  # The collector's own logs. `info` keeps export failures visible — a silent
+  # collector dropping every span is the failure mode worth catching.
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      # memory_limiter first: it must be able to reject before the batcher has
+      # already accepted the memory.
+      processors: [memory_limiter, batch]
+      exporters: [otlp/tempo]

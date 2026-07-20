@@ -11,26 +11,34 @@
 > pre-rendered to inline SVG under `docs/diagrams/` — the page has no CDN and no
 > JavaScript, and renders offline (ADR 0010).
 
-**Stage 4 of 10 (RAG).** The platform today is a FastAPI service whose chat
+**Stage 5 of 10 (Observability).** The platform is a FastAPI service whose chat
 endpoint runs a **real LangGraph agent loop against the Anthropic API**: it
 reasons, calls tools, observes the results, and answers — persisting the
 conversation to Postgres behind a Redis read-through cache, and reporting the
-model's own token counts.
+model's own token counts. Stage 4 grounds those answers in documents: a corpus is
+chunked and embedded (Voyage AI) into **Qdrant**, a `document_search` tool
+retrieves relevant passages, and the response carries **citations** back to the
+source chunks — retrieval is one more `Tool`, and the routes, SSE framing and
+`CompletionEngine`/`LLMClient` seams are untouched.
 
-**Stage 4 grounds those answers in documents.** A corpus is chunked and embedded
-(Voyage AI) into **Qdrant, which now holds data**; a new `document_search` tool
-lets the agent retrieve relevant passages and answer from them, and the response
-carries **citations** back to the source chunks. This changed nothing about the
-loop's shape: retrieval is one more `Tool` in the registry, and the routes, SSE
-framing and `CompletionEngine`/`LLMClient` seams are untouched.
+**Stage 5 gives the `@traced` seam a real backend.** Since Stage 1 every
+application function has carried `@traced`, logging enter/exit/error. It now also
+emits a **real OpenTelemetry span**, and each HTTP request is a root span (FastAPI
+auto-instrumentation) the `@traced` spans nest under. Spans export over OTLP/HTTP
+to a new **OTel Collector** container, which forwards them to **Grafana Tempo**;
+Grafana reads Tempo as a native datasource alongside Prometheus. **Not one of the
+~30 `@traced` call sites changed** — the seam was built for exactly this. Metrics
+stay on Prometheus (traces only through the collector — a deliberate scope cut,
+ADR 0016).
 
 **Stage 2's `EchoEngine` is gone.** The `CompletionEngine` protocol it sat behind
 is unchanged, which is what let the Stage 3 swap happen without redesigning the
-endpoint — and what let Stage 4 add grounding without touching it either.
+endpoint, let Stage 4 add grounding without touching it, and let Stage 5 add
+tracing without touching any of it.
 
 ---
 
-## Current state (Stage 4 — built and verified)
+## Current state (Stage 5 — built and verified)
 
 ### Component map
 
@@ -95,12 +103,17 @@ flowchart TD
     registry --> qd
 
     prom["prometheus"] -->|"scrapes /metrics"| api
+    api -->|"OTLP/http spans"| collector["otel-collector"]
+    collector -->|"OTLP/grpc"| tempo["tempo"]
     graf["grafana"] -->|"datasource"| prom
+    graf -->|"datasource"| tempo
 
     classDef external fill:#ede7ff,stroke:#7b5cd6,color:#2c1a66
     classDef store fill:#e8f4ff,stroke:#4a90d9,color:#0a3d62
+    classDef obs fill:#fff3e0,stroke:#e08a00,color:#5a3a00
     class anthropic,voyage external
     class pg,rd,qd store
+    class collector,tempo obs
 ```
 
 Ingestion (`scripts/ingest.py`) is an **offline operator action**, not part of
@@ -283,7 +296,7 @@ reports `"citations": []` rather than omitting the field.
 |--------|----------------|
 | `config.py` | Typed `Settings` (pydantic-settings), layered profiles — see ADR 0003. `prod` refuses to boot without all three datastore URLs, `ANTHROPIC_API_KEY`, *and* `VOYAGE_API_KEY` |
 | `logging.py` | JSON formatter (`timestamp`, `level`, `service`, `environment`, `request_id`, `logger`, `message`, `exception`) + console formatter; routes uvicorn logs through one handler |
-| `observability.py` | `@traced` — logs span enter/exit/duration/error; sync + async; PEP 695 typed |
+| `observability.py` | `@traced` — a structured DEBUG log **and** a real OpenTelemetry span (Stage 5) on enter/exit/duration/error; sync + async; PEP 695 typed. Imports the OTel **API** only, never the SDK, so `shared/` still never imports `services/` (ADR 0016) |
 | `datastores.py` | `Datastore` ABC + Postgres/Redis/Qdrant implementations and `DatastoreRegistry` — see ADR 0005 |
 | `migrations.py` | Forward-only raw-SQL migration runner, applied in the lifespan — see ADR 0007 |
 | `version.py` | `__version__`, kept in sync with `pyproject.toml` by a test |
@@ -354,17 +367,81 @@ A request **without** a `conversation_id` is stateless and touches neither store
 | `conversation_messages` | `conversation_id` -> `position` · `role` · `content`, unique on `(conversation_id, position)`, cascading delete |
 | `schema_migrations` | Applied versions; what makes the runner idempotent |
 
+### Tracing and the `@traced` seam (Stage 5)
+
+`@traced` has sat on every application function since Stage 1. Stage 5 makes it
+emit a real OpenTelemetry span alongside its DEBUG log, and wires the SDK — with
+**not one call site changed**. The split that makes that possible:
+
+- **`shared/observability.py`** imports the OTel **API** only and resolves its
+  tracer through the global provider. Until something installs one, that provider
+  is a no-op, so a script, an import or a unit test that never wires tracing emits
+  nothing and dials nothing — the datastore rule again (ADR 0005).
+- **`services/monitoring/tracing.py`** owns the **SDK**: it builds the provider,
+  chooses the exporter, and installs it. `shared/` never imports `services/`, so
+  the dependency arrow stays pointed the right way.
+
+```mermaid
+flowchart LR
+    traced["@traced fn"] --> api2["OTel API<br/>global provider"]
+    fastapi["FastAPI request"] --> api2
+    api2 --> select{"build_tracer_provider<br/><i>keyed on profile</i>"}
+    select -->|"test"| local["LocalTracerProvider<br/><i>spans real, never leave process</i>"]
+    select -->|"dev/prod + endpoint"| otlp["OTLPTracerProvider<br/>BatchSpanProcessor"]
+    select -->|"dev/prod, no endpoint"| local
+    otlp -->|"OTLP/http :4318"| collector["otel-collector"]
+    collector -->|"OTLP/grpc :4317"| tempo["tempo"]
+    tempo --> grafana["grafana"]
+
+    classDef good fill:#e9f7ec,stroke:#4caf7d,color:#0a4a2a
+    classDef node fill:#e8f4ff,stroke:#4a90d9,color:#0a3d62
+    classDef obs fill:#fff3e0,stroke:#e08a00,color:#5a3a00
+    class local good
+    class otlp,api2 node
+    class collector,tempo,grafana obs
+```
+
+**Hermetic by construction — the third vendor (ADR 0016).** The provider is
+chosen by the **profile**, not by whether a collector answers, exactly as for the
+Anthropic (ADR 0009) and Voyage (ADR 0011) clients. `OTLPTracerProvider` *raises*
+in its constructor under the `test` profile, before the endpoint is read, so no
+test can dial the collector regardless of what is exported. `test` gets a
+`LocalTracerProvider` whose spans are real but never leave the process — which is
+what the in-memory-exporter span tests assert against, with no collector running.
+
+**Not a `prod` boot requirement.** Unlike the datastore URLs and API keys, an
+unset `OTEL_EXPORTER_OTLP_ENDPOINT` yields a service that runs untraced and logs
+the fact — a trace backend is not worth refusing to serve traffic over. A dead
+collector at runtime costs dropped spans (the `BatchSpanProcessor` drops and
+logs), never a failed request.
+
+**Span hygiene (ADR 0016).** Every span carries **exactly two attributes** —
+`code.function` and `code.namespace` — both read off the function object at
+decoration time, never from a call's arguments or return value. There is
+structurally no path from wrapped-call data onto a span. On error the status
+description is the exception **type name only**; the message stays in the recorded
+event, not a searchable status. The rule against logging PII/secrets/queries/
+excerpts applies to span attributes identically, because a span goes to Tempo.
+
 ### Infrastructure (Docker Compose)
 
 `api` (built, non-root, multi-stage), `postgres`, `redis`, `qdrant`,
-`prometheus` (scrapes `api:8000/metrics`), `grafana` (Prometheus datasource
-provisioned as code). Postgres and Redis gate `api` startup via healthchecks.
-Grafana is on host port **3001** (3000 collides with an unrelated local
-container — see CLAUDE.md).
+`prometheus` (scrapes `api:8000/metrics`), `grafana` (Prometheus **and Tempo**
+datasources provisioned as code), and — new in Stage 5 — `otel-collector`
+(OTLP receiver on 4317/4318, traces only) and `tempo` (single-binary, local
+volume). Postgres and Redis gate `api` startup via healthchecks; the collector is
+a `depends_on: service_started` only — the API must boot whether or not tracing
+is up. Grafana is on host port **3001** (3000 collides with an unrelated local
+container — see CLAUDE.md); Tempo's HTTP/search API is on **3200**.
+
+Grafana ships one provisioned dashboard (`api-overview.json`: RED metrics from
+Prometheus + three Tempo trace tables) and three symptom-level alert rules
+(error rate > 5%, chat p99 > 30s, `/ready` 503) via Grafana-native unified
+alerting — no Alertmanager container (ADR 0016).
 
 ### Quality gate
 
-ruff (lint + format) · mypy `strict` · pytest (246 tests, plus opt-in
+ruff (lint + format) · mypy `strict` · pytest (273 tests, plus opt-in
 live-datastore, live-Qdrant and live-provider layers that skip by default) ·
 pre-commit · GitHub Actions running the same commands, **plus** a Docker job that
 boots the container against live postgres/redis/qdrant service containers and
@@ -386,17 +463,19 @@ builds it.
 
 | Component | Stage | Status today |
 |-----------|-------|--------------|
-| `services/monitoring` — `SpanExporter`; OpenTelemetry export, Grafana dashboards, alerts | 5 | **Not implemented.** `@traced` logs only; no OTel backend, no dashboards. |
 | `services/evaluation` — `Evaluator` ABC | 6 | **Not implemented.** Raises. |
 | `infrastructure/kubernetes`, `infrastructure/terraform` | 7 | **Empty placeholders.** Compose only today. |
 | `services/security` — `AuthProvider`, `Guardrail` | 8 | **Not implemented.** API is entirely unauthenticated. |
 | Reliability — load testing, chaos, SLOs, pool tuning, reconnect/circuit breaking | 9 | **Nothing exists.** |
 
-### Deliberate non-goals for Stage 4
+### Deliberate non-goals as of Stage 5
 
 **No authentication** (the corpus and the API are both unauthenticated — Stage 8),
-no OTel backend, no evaluation, no Kubernetes. Pagination conventions are still
-deferred — no endpoint returns a collection yet.
+no evaluation, no Kubernetes. **Metrics are not exported through the OTel
+collector** — the collector carries traces only, and metrics stay on Prometheus
+scraping `/metrics` (a deliberate scope cut, ADR 0016), so Grafana's service-map
+and node-graph views are switched off rather than left rendering "No data".
+Pagination conventions are still deferred — no endpoint returns a collection yet.
 
 Retrieval itself is deliberately minimal: no reranking, no hybrid (keyword +
 vector) search, no query expansion, and no automatic re-ingestion — ingestion is
@@ -414,8 +493,10 @@ Stage 9 owns the reliability of those calls.
 
 ## Key architectural properties
 
-**Stable seams.** `@traced` is the tracing seam (Stage 5 makes it emit OTel spans
-without touching a single call site). `get_settings()` is the config seam.
+**Stable seams.** `@traced` is the tracing seam, and **Stage 5 made good on it**:
+every one of its ~30 call sites now emits a real OpenTelemetry span, and not one
+of them changed — the SDK was swapped in underneath via the global provider (ADR
+0016). `get_settings()` is the config seam.
 `CompletionEngine` is the model seam — Stage 3 proved it, and **Stage 4 leaned on
 it again**: retrieval and citations were added and the endpoint, SSE framing and
 wire format still did not change shape (the wire *gained* a `citations` field but
@@ -468,4 +549,5 @@ unauthenticated** — that is Stage 8.
 - [ADR 0013 — Citation shape](adr/0013-citation-shape.md)
 - [ADR 0014 — Prompt-injection mitigation for retrieved text](adr/0014-prompt-injection-mitigation.md)
 - [ADR 0015 — Opt-in live provider contract test](adr/0015-live-provider-contract-test.md)
+- [ADR 0016 — Observability stack: OTel traces → Collector → Tempo, Grafana-native alerting](adr/0016-observability-stack.md)
 - [PROJECT_STATUS.md](PROJECT_STATUS.md) — roadmap and progress

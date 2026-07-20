@@ -5,6 +5,10 @@ datasources:
   - name: Prometheus
     type: prometheus
     access: proxy
+    # Explicit uid (Stage 5): the provisioned dashboards and the Tempo
+    # datasource's tracesToMetrics link both reference this datasource by uid.
+    # Left unset, Grafana generates one per install and those references break.
+    uid: prometheus
     url: http://prometheus:9090
     isDefault: true
     editable: false

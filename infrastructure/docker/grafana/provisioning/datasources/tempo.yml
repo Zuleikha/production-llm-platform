@@ -1,0 +1,29 @@
+# Grafana datasource provisioned as code — no manual UI setup needed.
+# Traces arrive here via the OTel Collector, never straight from the API (ADR 0016).
+apiVersion: 1
+
+datasources:
+  - name: Tempo
+    type: tempo
+    access: proxy
+    uid: tempo
+    url: http://tempo:3200
+    isDefault: false
+    editable: false
+    jsonData:
+      # Links a trace's spans to the Prometheus RED metrics on the same
+      # dashboard, so "this request was slow" and "the p99 moved" are two views
+      # of one incident rather than two tabs someone correlates by hand.
+      tracesToMetrics:
+        datasourceUid: prometheus
+        tags:
+          - key: service.name
+            value: service
+      # No serviceMap / nodeGraph. Both are driven by the collector's
+      # spanmetrics + servicegraph connectors remote-writing to Prometheus —
+      # i.e. the second metrics pipeline ADR 0016 deliberately did not build.
+      # Enabling them while nothing produces those series would provision a
+      # panel that renders "No data" forever and reads as a broken stack rather
+      # than a deliberate scope cut. The RED panels read the API's own /metrics.
+      nodeGraph:
+        enabled: false

@@ -6,7 +6,9 @@ global:
   external_labels:
     platform: production-llm-platform
 
-# Alerting rules are planned, not yet implemented (Stage 5 — observability).
+# No Prometheus alerting rules by design. Stage 5 chose Grafana's built-in
+# unified alerting (provisioned under grafana/provisioning/alerting/) over a
+# Prometheus + Alertmanager pipeline — one fewer container family (ADR 0016).
 rule_files: []
 
 scrape_configs:

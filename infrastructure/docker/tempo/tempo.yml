@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# Grafana Tempo — single-binary, local filesystem backend. See ADR 0016.
+#
+# This is the local-development shape: one process, traces on a docker volume.
+# A real deployment splits the components and puts blocks in object storage;
+# that is Stage 7's problem, not this file's.
+# ---------------------------------------------------------------------------
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        # Only the collector writes here — the API never talks to Tempo
+        # directly. Keeping the hop means the collector stays the one place
+        # sampling, batching and redaction could later be enforced for every
+        # producer at once.
+        grpc:
+          endpoint: 0.0.0.0:4317
+
+ingester:
+  # Short, so a trace is searchable seconds after the request that made it
+  # rather than minutes. Fine at this volume; wrong for a real ingest rate.
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    # Local dev retention. Long enough to debug this morning's request, short
+    # enough that the volume does not grow without bound.
+    block_retention: 24h
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+usage_report:
+  reporting_enabled: false

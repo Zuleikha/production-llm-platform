@@ -1,11 +1,17 @@
 # ---------------------------------------------------------------------------
-# Local development stack: api + postgres + redis + qdrant + prometheus + grafana.
+# Local development stack: api + postgres + redis + qdrant + prometheus +
+# grafana + otel-collector + tempo.
 #
 #   docker compose up -d --build
 #   curl http://localhost:8000/health
 #
 # The api connects to postgres/redis/qdrant on startup (Stage 2) and probes all
-# three from /ready. Connection URLs are injected as env vars below.
+# three from /ready. Connection URLs are injected as env vars below. It exports
+# traces to the collector, which forwards them to Tempo (Stage 5, ADR 0016).
+#
+# Ports on the host: api 8000 · postgres 5432 · redis 6379 · qdrant 6333/6334 ·
+# prometheus 9090 · grafana 3001 (NOT 3000 — see CLAUDE.md) · tempo 3200 ·
+# collector 4317/4318.
 #
 # Credentials below are LOCAL DEV PLACEHOLDERS ONLY, overridable via .env.
 # Production secrets are injected by the deployment platform, never committed.
@@ -43,12 +49,22 @@ services:
       # agent answers ungrounded. Needed by `scripts/ingest.py` too — that is
       # what actually spends the money.
       VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
+      # Where @traced sends its spans (Stage 5, ADR 0016). Unset = never dialled
+      # and the service runs untraced, so this is what turns tracing on. Not a
+      # secret and not a boot requirement — a missing collector must not stop the
+      # API serving traffic.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
       qdrant:
+        condition: service_started
+      # Started, not healthy: the API must boot whether or not the collector is
+      # up. Spans are dropped by the SDK's batch processor if nothing is
+      # listening — tracing degrades, the service does not.
+      otel-collector:
         condition: service_started
     networks: [platform]
 
@@ -99,6 +115,39 @@ services:
       - qdrant_data:/qdrant/storage
     networks: [platform]
 
+  # --- Tracing (Stage 5, ADR 0016) -----------------------------------------
+  # api --OTLP/http:4318--> otel-collector --OTLP/grpc:4317--> tempo <-- grafana
+  #
+  # The collector is a hop the API could technically skip by writing to Tempo
+  # directly. It earns its place as the one point where sampling, batching and
+  # (later) redaction apply to every producer at once, and as the seam that lets
+  # the trace backend change without touching application config. Traces only —
+  # metrics stay on Prometheus scraping /metrics (ADR 0016).
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.116.1
+    restart: unless-stopped
+    command: ["--config=/etc/otel-collector/config.yml"]
+    volumes:
+      - ./infrastructure/docker/otel-collector/config.yml:/etc/otel-collector/config.yml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP — what the API speaks
+    depends_on:
+      - tempo
+    networks: [platform]
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo/tempo.yml"]
+    user: "0:0"  # writes to the volume below; the image's default user cannot
+    volumes:
+      - ./infrastructure/docker/tempo/tempo.yml:/etc/tempo/tempo.yml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "3200:3200"   # HTTP — Grafana's datasource and the trace-search API
+    networks: [platform]
+
   prometheus:
     image: prom/prometheus:v2.55.0
     restart: unless-stopped
@@ -130,6 +179,7 @@ services:
       - grafana_data:/var/lib/grafana
     depends_on:
       - prometheus
+      - tempo
     networks: [platform]
 
 networks:
@@ -142,3 +192,4 @@ volumes:
   qdrant_data:
   prometheus_data:
   grafana_data:
+  tempo_data:

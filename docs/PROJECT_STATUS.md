@@ -6,13 +6,13 @@ Every stage prompt references this file. Update it at the end of each stage.
 | | |
 |---|---|
 | **Current version** | `0.1.0` |
-| **Current stage** | Stage 4 — RAG (**complete**) |
-| **Overall progress** | **4 / 10 stages — 40%** |
-| **Next milestone** | Stage 5 — Observability |
-| **Last updated** | 2026-07-16 |
+| **Current stage** | Stage 5 — Observability (**complete**) |
+| **Overall progress** | **5 / 10 stages — 50%** |
+| **Next milestone** | Stage 6 — MLOps |
+| **Last updated** | 2026-07-18 |
 
 ```
-Progress  [████──────]  4/10
+Progress  [█████─────]  5/10
 ```
 
 ---
@@ -83,12 +83,12 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
 | 2 | API | [stage-02-api.md](stage-summaries/stage-02-api.md) | [stage-02-api.md](verification-log/stage-02-api.md) | 2026-07-14 |
 | 3 | Agents | [stage-03-agents.md](stage-summaries/stage-03-agents.md) | [stage-03-agents.md](verification-log/stage-03-agents.md) | 2026-07-15 |
 | 4 | RAG | [stage-04-rag.md](stage-summaries/stage-04-rag.md) | [stage-04-rag.md](verification-log/stage-04-rag.md) | 2026-07-16 |
+| 5 | Observability | [stage-05-observability.md](stage-summaries/stage-05-observability.md) | _pending independent verification_ | 2026-07-18 |
 
 ## Remaining stages
 
 | Stage | Name | Summary file (fixed) | Objective |
 |:-----:|------|----------------------|-----------|
-| 5 | Observability | `stage-05-observability.md` | OpenTelemetry traces/metrics export, `@traced` → real spans, Grafana dashboards, alerting |
 | 6 | MLOps | `stage-06-mlops.md` | Evaluation (`Evaluator`), eval datasets, LLM-as-judge, regression gates in CI, pipelines |
 | 7 | Kubernetes | `stage-07-kubernetes.md` | K8s manifests/Helm (probes → `/health`, `/ready`), Terraform provisioning |
 | 8 | Security | `stage-08-security.md` | AuthN/AuthZ, input/output guardrails, rate limiting, secret management, security scanning |
@@ -149,12 +149,26 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
   `test` profile ignores the root `.env` so the suite stays hermetic.
 - **Prometheus metrics** — request counter + latency histogram, labelled by
   route template; scraped successfully by the Prometheus container.
+- **Distributed tracing (Stage 5)** — `@traced` (on ~30 functions since Stage 1)
+  now emits a real **OpenTelemetry span** as well as its DEBUG log, and each HTTP
+  request is a root span via FastAPI auto-instrumentation. Spans export over
+  OTLP/HTTP to an **OTel Collector** and land in **Grafana Tempo**, read as a
+  native Grafana datasource. Hermetic by construction — the `test` profile
+  *cannot* construct the exporting provider (ADR 0016), so the suite makes no
+  network call and needs no collector. Spans carry static code identity only
+  (`code.function`, `code.namespace`) — never arguments, return values, or the
+  exception message as a searchable status.
+- **Grafana dashboards + alerting as code (Stage 5)** — one provisioned
+  dashboard (`api-overview`: RED metrics from Prometheus + Tempo trace tables) and
+  three symptom-level alert rules (error rate > 5%, chat p99 > 30s, `/ready` 503)
+  via Grafana-native unified alerting — no Alertmanager container.
 - **Global error handling** — uniform `{"error": {...}}` envelope; 500s never
   leak internals.
 - **Lifespan hooks** — `service.startup` / `service.shutdown`.
 - **Docker Compose stack** — api (multi-stage, **non-root** uid 1001), postgres,
-  redis, qdrant, prometheus, grafana (datasource provisioned as code).
-- **Quality gate** — ruff, ruff-format, mypy `strict`, pytest (246 tests, plus
+  redis, qdrant, prometheus, grafana (datasources provisioned as code), plus
+  **otel-collector** and **tempo** (traces, Stage 5).
+- **Quality gate** — ruff, ruff-format, mypy `strict`, pytest (273 tests, plus
   opt-in live-datastore / live-Qdrant / live-provider layers that skip by
   default), pre-commit; GitHub Actions runs all of it plus a Docker build against
   live postgres/redis/qdrant service containers, asserting `/ready` reports every
@@ -163,8 +177,10 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
 ### ❌ Does not exist yet
 
 **No authentication** (the corpus and API are both unauthenticated) · no
-OpenTelemetry backend · no Grafana dashboards · no Kubernetes/Terraform · no
-evaluation · no load testing.
+Kubernetes/Terraform · no evaluation · no load testing · **no OTel metrics
+pipeline** — the collector carries traces only and metrics stay on Prometheus
+(deliberate scope cut, ADR 0016), so Grafana's service-map / node-graph views are
+switched off rather than left empty.
 
 All three datastores now hold real data — Postgres (conversation history), Redis
 (its cache), and **Qdrant (document vectors, new in Stage 4)**.
@@ -185,22 +201,29 @@ no endpoint returns a collection yet. Revisit when one does.
 
 ---
 
-## Next milestone — Stage 5 (Observability)
+## Next milestone — Stage 6 (MLOps)
 
-**Objective:** real distributed tracing and metrics export, dashboards, alerting.
+**Objective:** an evaluation harness — the `Evaluator` seam, eval datasets,
+LLM-as-judge scoring, and regression gates wired into CI.
 
 Expected scope:
 
-1. `services/monitoring` — a `SpanExporter`; make `@traced` emit real
-   OpenTelemetry spans without touching call sites (the seam exists for this).
-2. OTel traces + metrics export to a collector; wire the pinned `observability`
-   extra.
-3. Grafana dashboards provisioned as code; alerting rules on symptom-level
-   signals.
+1. `services/evaluation` — implement the `Evaluator` ABC (currently a stub that
+   raises); offline eval over a fixed dataset.
+2. LLM-as-judge scoring, hermetic by the same construction as the chat path
+   (ADR 0009) — the `test` profile cannot call a real model.
+3. Regression gates in CI: a scored eval that fails the build when quality drops.
 
-**Prerequisites** (all met): the `@traced` seam on every application function,
-structured JSON logging, Prometheus metrics + Grafana already in the compose
-stack.
+**Prerequisites** (all met as of Stage 5): the `CompletionEngine` seam, real
+distributed tracing to correlate an eval run's spans, and the hermetic-provider
+pattern (ADR 0009/0011/0016) to extend to a judge.
+
+**Resolved in Stage 5:** the `@traced` seam now has a real OpenTelemetry backend
+(spans → OTel Collector → Tempo, ADR 0016), with the profile-keyed hermetic guard
+extended to the collector as a third external hop. Grafana dashboards and
+symptom-level alerting are provisioned as code. Metrics export through OTel was
+**deliberately not built** — the collector carries traces only, Prometheus keeps
+`/metrics` (ADR 0016).
 
 **Resolved in Stage 4 (was carried forward from Stage 3):** the missing contract
 test against the real external APIs. Stage 4 added an opt-in, double-gated live

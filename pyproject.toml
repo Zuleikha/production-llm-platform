@@ -7,10 +7,12 @@ requires-python = ">=3.12,<3.13"
 license = { text = "MIT" }
 authors = [{ name = "production-llm-platform maintainers" }]
 
-# Base runtime dependencies. These are the ONLY packages required to run the
-# API through Stage 2. Heavy future-stage libraries (LangChain, LangGraph,
-# LlamaIndex, OpenTelemetry SDK) remain optional extras below so the base
-# install stays small and `uv sync` stays fast and reliable.
+# Base runtime dependencies — everything required to run the API today.
+# Libraries arrive here in one of two ways: pinned straight in when the stage
+# that needs them lands, or declared as an optional extra a stage early and
+# promoted once they are actually wired. Stages 2 (datastores), 3 (orchestration),
+# 4 (retrieval) and 5 (observability) each promoted their extra on the stage it
+# stopped being optional; no extras remain.
 # All versions are pinned exactly (== ) — see ADR 0001 for rationale.
 dependencies = [
     "fastapi==0.139.0",
@@ -55,6 +57,26 @@ dependencies = [
     # Qdrant's own client, replacing Stage 2's raw-httpx /readyz probe now that
     # the collection actually holds vectors (ADR 0012).
     "qdrant-client==1.18.0",
+    # Observability — promoted out of the `observability` extra in Stage 5, when
+    # `@traced` stopped being log-only and started emitting real OTel spans that
+    # every request exports to a collector (ADR 0016). The whole extra moved: the
+    # API and SDK are on the request path of every traced call, and the FastAPI
+    # instrumentation is wired in the lifespan.
+    #
+    # api/sdk/exporter move in lockstep on 1.43.0; the instrumentation packages
+    # version separately (0.64b0 is the sibling release of 1.43.0) — that split is
+    # upstream's, not ours.
+    "opentelemetry-api==1.43.0",
+    "opentelemetry-sdk==1.43.0",
+    "opentelemetry-instrumentation-fastapi==0.64b0",
+    # OTLP over http/protobuf, NOT grpc. Not a weight argument — `grpcio` is
+    # already in the tree via qdrant-client and `requests` via voyageai, so
+    # neither exporter adds a new compiled dependency. The reasons are that
+    # http/protobuf keeps the collector's :4318 receiver curl-able when a trace
+    # goes missing, and that it avoids a second package competing with
+    # qdrant-client over `grpcio`'s version range. The collector receives both
+    # protocols, so nothing downstream depends on the choice. See ADR 0016.
+    "opentelemetry-exporter-otlp-proto-http==1.43.0",
 ]
 
 [project.optional-dependencies]
@@ -66,15 +88,17 @@ dependencies = [
 # NOTE: the `retrieval` extra (llama-index, qdrant-client) was removed in Stage 4
 # — retrieval is now a base concern. See the base dependencies above for why
 # `llama-index-core` was promoted in place of the `llama-index` meta-package.
-# Stage 5 (observability backends: OTel export, collector).
-observability = [
-    "opentelemetry-api==1.43.0",
-    "opentelemetry-sdk==1.43.0",
-    "opentelemetry-instrumentation-fastapi==0.64b0",
-]
+# NOTE: the `observability` extra (opentelemetry api/sdk/instrumentation-fastapi)
+# was removed in Stage 5 — tracing is now a base concern. `@traced` sits on ~30
+# call sites and emits a real span on every one, so the SDK is no more optional
+# than the logger is. The OTLP exporter was added at the same time (ADR 0016).
 # NOTE: the `datastores` extra (redis, asyncpg) was removed in Stage 2 — those
 # drivers are now base dependencies, since the API connects to Postgres and
 # Redis on every startup and they are no longer optional.
+#
+# No extras remain. Every stage that declared one has since either promoted it to
+# a base dependency or dropped it; the table is kept empty rather than deleted so
+# the next stage that needs a staged dependency has the pattern in front of it.
 
 [dependency-groups]
 # Developer tooling — installed by `uv sync` by default, excluded from images.

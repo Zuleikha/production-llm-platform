@@ -104,6 +104,21 @@ class Settings(BaseSettings):
     voyage_embedding_dimensions: int = Field(default=1024, gt=0)
     voyage_timeout_seconds: float = Field(default=30.0, gt=0)
 
+    # --- Tracing / OpenTelemetry (Stage 5, ADR 0016) ---
+    # The OTLP http/protobuf endpoint of the collector, e.g.
+    # http://otel-collector:4318. Follows the datastore idiom deliberately (ADR
+    # 0005): unset means never dialled, not "dial localhost and log failures".
+    # A trace backend is not worth a boot failure, so unlike the datastore URLs
+    # this is NOT required under `prod` — an unset endpoint yields a service that
+    # runs untraced and says so in its startup log. Under `test` it is ignored
+    # entirely: the test profile cannot construct an exporter at all (ADR 0016).
+    otel_exporter_otlp_endpoint: str | None = None
+    # Head sampling ratio, applied at the root span. 1.0 (trace everything) is
+    # right for a demonstration platform at this volume; Stage 9 owns the load
+    # levels where that stops being true.
+    otel_traces_sample_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
+    otel_export_timeout_seconds: float = Field(default=10.0, gt=0)
+
     # --- Retrieval / Qdrant (Stage 4, ADR 0012) ---
     qdrant_collection: str = "documents"
     # Chunking. 512 tokens is well inside Voyage's context and keeps a chunk
