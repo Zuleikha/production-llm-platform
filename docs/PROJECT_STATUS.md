@@ -6,13 +6,13 @@ Every stage prompt references this file. Update it at the end of each stage.
 | | |
 |---|---|
 | **Current version** | `0.1.0` |
-| **Current stage** | Stage 6 — MLOps (**complete**) |
-| **Overall progress** | **6 / 10 stages — 60%** |
-| **Next milestone** | Stage 7 — Kubernetes |
-| **Last updated** | 2026-07-20 |
+| **Current stage** | Stage 7 — Kubernetes (**complete**) |
+| **Overall progress** | **7 / 10 stages — 70%** |
+| **Next milestone** | Stage 8 — Security |
+| **Last updated** | 2026-07-21 |
 
 ```
-Progress  [██████────]  6/10
+Progress  [███████───]  7/10
 ```
 
 ---
@@ -85,12 +85,12 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
 | 4 | RAG | [stage-04-rag.md](stage-summaries/stage-04-rag.md) | [stage-04-rag.md](verification-log/stage-04-rag.md) | 2026-07-16 |
 | 5 | Observability | [stage-05-observability.md](stage-summaries/stage-05-observability.md) | _pending independent verification_ | 2026-07-18 |
 | 6 | MLOps | [stage-06-mlops.md](stage-summaries/stage-06-mlops.md) | _pending independent verification_ | 2026-07-20 |
+| 7 | Kubernetes | [stage-07-kubernetes.md](stage-summaries/stage-07-kubernetes.md) | _pending independent verification_ | 2026-07-21 |
 
 ## Remaining stages
 
 | Stage | Name | Summary file (fixed) | Objective |
 |:-----:|------|----------------------|-----------|
-| 7 | Kubernetes | `stage-07-kubernetes.md` | K8s manifests/Helm (probes → `/health`, `/ready`), Terraform provisioning |
 | 8 | Security | `stage-08-security.md` | AuthN/AuthZ, input/output guardrails, rate limiting, secret management, security scanning |
 | 9 | Reliability | `stage-09-reliability.md` | Load testing, chaos/failure testing, SLOs, resilience patterns |
 | 10 | Portfolio | `stage-10-portfolio.md` | Final polish, docs, demos, case study writeup |
@@ -176,17 +176,36 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
   build when a score drops below the checked-in baseline minus tolerance. **Tier 2**
   (LLM-as-judge: faithfulness + citation accuracy) is opt-in, billable, and never
   in CI — same double opt-in as the live contract test (ADR 0015, 0017).
+- **Kubernetes deployment via Helm (Stage 7)** — the `api` image deploys to a
+  Kubernetes cluster through a Helm chart
+  (`infrastructure/kubernetes/helm/production-llm-platform/`) with
+  `livenessProbe → /health` and `readinessProbe → /ready`, a ConfigMap for
+  non-secret settings and a Secret for URLs/keys injected at install, resource
+  requests/limits, configurable replicas, and an optional HPA. Verified end-to-end
+  on a real local `kind` cluster: every pod reaches `Ready` and `/ready` reports
+  all three datastores `ok`. Minimal **dev-only** in-cluster Postgres/Redis/Qdrant
+  (gated by `devDependencies.enabled`) make that local verification possible;
+  production points the datastore URLs at Terraform-managed services (ADR 0018).
+- **Cloud provisioning as code (Stage 7)** — Terraform modules
+  (`infrastructure/terraform/`, target AWS) for networking (VPC), cluster (EKS),
+  Postgres (RDS), Redis (ElastiCache), object storage (S3) and secrets (Secrets
+  Manager references, no values). **Validated, never applied**: `terraform init`
+  (local backend) + `validate` + `fmt -check` pass and are the CI-safe gate;
+  `plan`/`apply` need real AWS credentials this project does not have and are a
+  deliberate scope boundary (ADR 0018).
 - **Quality gate** — ruff, ruff-format, mypy `strict`, pytest (311 tests, plus
   opt-in live-datastore / live-Qdrant / live-provider layers that skip by
   default), pre-commit; GitHub Actions runs all of it plus the hermetic Tier 1
   eval regression gate and a Docker build against live postgres/redis/qdrant
   service containers, asserting `/ready` reports every store `ok` and that chat +
-  SSE work.
+  SSE work. **Stage 7 adds three hermetic infra jobs**: `helm lint`/`template`, a
+  `terraform fmt -check`/`validate` gate, and a `kind` job that installs the chart
+  with dev datastores and curls `/ready` inside the runner.
 
 ### ❌ Does not exist yet
 
-**No authentication** (the corpus and API are both unauthenticated) · no
-Kubernetes/Terraform · no load testing · **no OTel metrics pipeline** — the
+**No authentication** (the corpus and API are both unauthenticated) · no load
+testing · **no OTel metrics pipeline** — the
 collector carries traces only and metrics stay on Prometheus (deliberate scope
 cut, ADR 0016), so Grafana's service-map / node-graph views are switched off
 rather than left empty; building that metrics-from-traces pipeline is deferred to
@@ -213,15 +232,27 @@ no endpoint returns a collection yet. Revisit when one does.
 
 ---
 
-## Next milestone — Stage 7 (Kubernetes)
+## Next milestone — Stage 8 (Security)
 
-**Objective:** deployment manifests — K8s/Helm with readiness/liveness probes
-wired to `/ready` and `/health`, and Terraform provisioning.
+**Objective:** authentication/authorization, input/output guardrails, rate
+limiting, secret management, and security scanning — the API is unauthenticated
+today, and the retrieval prompt-injection mitigation is delimiting + labelling
+only (ADR 0014), not full hardening.
 
-**Prerequisites** (all met as of Stage 6): honest `/health` vs `/ready` probes
-(the kubelet's readiness probe is what finally arms the `/ready` alert, ADR 0016),
-the Docker image already built and boot-verified in CI, and a hermetic quality
-gate — now including a RAG regression gate — that a deployment pipeline can lean on.
+**Prerequisites** (all met as of Stage 7): a real deployment target — the API
+runs on Kubernetes via Helm with probes wired to `/health`/`/ready`, verified on
+`kind` (ADR 0018) — and Terraform's Secrets Manager references give auth/rate-limit
+config a place to source secrets from. The unauthenticated API and the untrusted
+corpus (ADR 0014) are the surfaces Stage 8 hardens.
+
+**Resolved in Stage 7:** deployment moved off compose-only. The `api` image
+deploys to Kubernetes through a Helm chart with liveness/readiness probes on
+`/health`/`/ready`, verified end-to-end on a real `kind` cluster (`/ready` reports
+all three stores `ok`). Terraform modules (AWS: VPC/EKS/RDS/ElastiCache/S3/Secrets
+Manager) are written and **validated, never applied** — no AWS account exists, a
+deliberate boundary matching how paid LLM APIs are treated. The dev-vs-managed
+datastore split is enforced by the `devDependencies.enabled` flag (ADR 0018). CI
+gained `helm`, `terraform`, and `kind`-deploy jobs, all hermetic.
 
 **Resolved in Stage 6:** the `Evaluator` stub is implemented (ADR 0017). The RAG
 retrieval pipeline has a two-tier harness run by `scripts/evaluate.py`: a hermetic,

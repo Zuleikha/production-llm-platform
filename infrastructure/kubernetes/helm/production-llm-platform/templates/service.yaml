@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "production-llm-platform.fullname" . }}
+  labels:
+    {{- include "production-llm-platform.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "production-llm-platform.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api

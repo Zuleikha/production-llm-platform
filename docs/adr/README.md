@@ -30,6 +30,7 @@ Every ADR uses: **Context** (the forces at play) → **Decision** (what we chose
 | [0015](0015-live-provider-contract-test.md) | An opt-in live contract test for both external providers | Accepted | 4 |
 | [0016](0016-observability-stack.md) | Observability stack: OTel traces → Collector → Tempo, Grafana-native alerting | Accepted | 5 |
 | [0017](0017-rag-evaluation-and-regression-gate.md) | RAG evaluation: recall@k/MRR, CI-vs-opt-in two-tier split, regression baseline | Accepted | 6 |
+| [0018](0018-kubernetes-and-terraform.md) | Kubernetes via Helm, dev-mode vs Terraform-managed datastores, validate-not-apply AWS Terraform | Accepted | 7 |
 
 ## Conventions
 

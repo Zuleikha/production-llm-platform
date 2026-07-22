@@ -1,0 +1,193 @@
+{{- if .Values.devDependencies.enabled }}
+# ===========================================================================
+# DEV-ONLY in-cluster datastores. NOT the production path.
+#
+# These minimal, ephemeral (emptyDir) Deployments + Services exist solely so a
+# local `kind` cluster can bring the API's /ready endpoint to `ok` without any
+# managed cloud services. In production, set devDependencies.enabled=false and
+# point datastores.* at the Terraform-managed RDS / ElastiCache / Qdrant.
+# Images are pinned to exactly what docker-compose.yml uses. See this chart's
+# README for why these are here and why they must never be used for real data.
+# ===========================================================================
+{{- $fullname := include "production-llm-platform.fullname" . }}
+{{- $pg := .Values.devDependencies.postgres }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-postgres
+  labels:
+    {{- include "production-llm-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dev-postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "production-llm-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: dev-postgres
+  template:
+    metadata:
+      labels:
+        {{- include "production-llm-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: dev-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: {{ $pg.image | quote }}
+          env:
+            # Local dev placeholder credentials, identical to docker-compose's
+            # defaults — an ephemeral, cluster-internal database, not a secret.
+            - name: POSTGRES_USER
+              value: {{ $pg.user | quote }}
+            - name: POSTGRES_PASSWORD
+              value: {{ $pg.password | quote }}
+            - name: POSTGRES_DB
+              value: {{ $pg.database | quote }}
+            # Postgres refuses to init a data dir that already contains lost+found;
+            # a subdir keeps emptyDir clean.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ $pg.user | quote }}, "-d", {{ $pg.database | quote }}]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            {{- toYaml $pg.resources | nindent 12 }}
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-postgres
+  labels:
+    {{- include "production-llm-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dev-postgres
+spec:
+  ports:
+    - port: 5432
+      targetPort: 5432
+  selector:
+    {{- include "production-llm-platform.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: dev-postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-redis
+  labels:
+    {{- include "production-llm-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dev-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "production-llm-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: dev-redis
+  template:
+    metadata:
+      labels:
+        {{- include "production-llm-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: dev-redis
+    spec:
+      containers:
+        - name: redis
+          image: {{ .Values.devDependencies.redis.image | quote }}
+          args: ["redis-server", "--appendonly", "yes"]
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            {{- toYaml .Values.devDependencies.redis.resources | nindent 12 }}
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-redis
+  labels:
+    {{- include "production-llm-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dev-redis
+spec:
+  ports:
+    - port: 6379
+      targetPort: 6379
+  selector:
+    {{- include "production-llm-platform.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: dev-redis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-qdrant
+  labels:
+    {{- include "production-llm-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dev-qdrant
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "production-llm-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: dev-qdrant
+  template:
+    metadata:
+      labels:
+        {{- include "production-llm-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: dev-qdrant
+    spec:
+      containers:
+        - name: qdrant
+          image: {{ .Values.devDependencies.qdrant.image | quote }}
+          ports:
+            - containerPort: 6333
+            - containerPort: 6334
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 6333
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /qdrant/storage
+          resources:
+            {{- toYaml .Values.devDependencies.qdrant.resources | nindent 12 }}
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-qdrant
+  labels:
+    {{- include "production-llm-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dev-qdrant
+spec:
+  ports:
+    - name: http
+      port: 6333
+      targetPort: 6333
+    - name: grpc
+      port: 6334
+      targetPort: 6334
+  selector:
+    {{- include "production-llm-platform.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: dev-qdrant
+{{- end }}

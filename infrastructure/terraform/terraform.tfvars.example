@@ -1,0 +1,36 @@
+# Example variable overrides. Copy to terraform.tfvars and adjust.
+#
+# NO SECRETS GO HERE. API keys and DB passwords are never Terraform inputs —
+# the RDS password is RDS-managed in Secrets Manager, and app API keys are
+# populated into their Secrets Manager containers out-of-band (see the secrets
+# module). terraform.tfvars is git-ignored; this .example file is committed.
+#
+# All values below are illustrative, NOT sized for real load (Stage 9 owns that).
+
+aws_region  = "eu-west-2"
+environment = "prod"
+name_prefix = "pllm"
+
+# Networking
+vpc_cidr             = "10.0.0.0/16"
+availability_zones   = ["eu-west-2a", "eu-west-2b"]
+public_subnet_cidrs  = ["10.0.0.0/20", "10.0.16.0/20"]
+private_subnet_cidrs = ["10.0.128.0/20", "10.0.144.0/20"]
+
+# EKS
+kubernetes_version      = "1.31"
+eks_node_instance_types = ["t3.medium"]
+eks_node_desired_size   = 2
+eks_node_min_size       = 2
+eks_node_max_size       = 4
+
+# RDS
+postgres_instance_class    = "db.t3.micro"
+postgres_engine_version    = "16.4"
+postgres_allocated_storage = 20
+postgres_db_name           = "platform"
+postgres_username          = "platform"
+
+# ElastiCache
+redis_node_type      = "cache.t3.micro"
+redis_engine_version = "7.1"

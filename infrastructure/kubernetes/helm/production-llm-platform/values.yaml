@@ -1,0 +1,177 @@
+# ---------------------------------------------------------------------------
+# Default values for the production-llm-platform chart.
+#
+# Override at install time with -f my-values.yaml or --set key=value. Secret
+# values (API keys) are BLANK here on purpose — supply them at install with
+# --set secrets.anthropicApiKey=... / --set-file, never by committing a value.
+# ---------------------------------------------------------------------------
+
+# --- API image -------------------------------------------------------------
+# Same image the Dockerfile builds and docker-compose runs. For a kind cluster
+# the image is loaded with `kind load docker-image`, so pullPolicy stays
+# IfNotPresent and there is no registry to reach.
+image:
+  repository: production-llm-platform/api
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# Number of API replicas. Overridden by the HPA when autoscaling.enabled=true.
+replicaCount: 2
+
+nameOverride: ""
+fullnameOverride: ""
+
+# --- Non-secret application settings (become a ConfigMap) ------------------
+# ENVIRONMENT drives the config profile (shared/config.py). Default `prod`:
+# this chart's purpose is production deployment. `prod` refuses to boot without
+# all three datastore URLs AND both API keys (ADR 0005/0006/0011) — set them
+# below / via --set, or use `dev` for a keyless local smoke test.
+env:
+  ENVIRONMENT: prod
+  LOG_FORMAT: json
+  LOG_LEVEL: INFO
+
+# --- Service ---------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 8000
+
+# Container port the app binds (uvicorn --port). Matches the Dockerfile EXPOSE.
+containerPort: 8000
+
+# --- Probes ----------------------------------------------------------------
+# Wired to the app's real endpoints: /health is pure liveness (touches no
+# datastore), /ready probes every configured store and 503s when one is down
+# (see services/api/routes/health.py, ADR 0005). The kubelet's readiness probe
+# is what routes traffic away from a pod whose datastores are unreachable.
+probes:
+  liveness:
+    path: /health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 5
+  readiness:
+    path: /ready
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# --- Resource requests / limits --------------------------------------------
+# Illustrative, NOT sized for real load — that is Stage 9's job. Enough to let a
+# kind pod schedule and serve.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# --- Datastore connection URLs ---------------------------------------------
+# PRODUCTION: point these at the managed services Terraform provisions —
+# RDS (Postgres), ElastiCache (Redis), and a reachable Qdrant — via
+# --set-file or a values override, and leave devDependencies.enabled=false.
+#
+# LOCAL/kind: leave these blank and set devDependencies.enabled=true; the
+# templates then fill them with the in-cluster dev datastores below. Blank +
+# devDependencies disabled = the URLs stay empty and /ready reports the stores
+# `not_configured` (and under `prod` the app refuses to boot — fail loud).
+#
+# These can embed credentials, so they live in the Secret, never the ConfigMap.
+datastores:
+  databaseUrl: ""
+  redisUrl: ""
+  qdrantUrl: ""
+
+# --- Secrets (become a Secret) ---------------------------------------------
+# BLANK by default and NEVER committed with real values. Inject at install:
+#   --set secrets.anthropicApiKey=sk-ant-... --set secrets.voyageApiKey=pa-...
+# In a real cluster these come from an external secret store (e.g. the AWS
+# Secrets Manager references the Terraform secrets module wires up), not from a
+# values file on disk.
+secrets:
+  anthropicApiKey: ""
+  voyageApiKey: ""
+
+# --- Tracing (optional, ADR 0016) ------------------------------------------
+# OTLP/HTTP endpoint of an OTel collector, e.g. http://otel-collector:4318.
+# Blank = the service runs untraced and says so at boot (never a boot failure).
+otel:
+  endpoint: ""
+
+# --- Horizontal Pod Autoscaler (optional) ----------------------------------
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 75
+
+# --- Pod scheduling / security ---------------------------------------------
+# The image already runs as non-root uid 1001 (Dockerfile). These reassert it
+# at the pod level so the cluster enforces it regardless of the image.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ---------------------------------------------------------------------------
+# Dev-only in-cluster datastores.
+#
+# These exist SOLELY so a local kind cluster can bring /ready to `ok` without
+# any managed cloud services — a one-command end-to-end verification of the
+# chart. They are ephemeral (emptyDir, single replica, no backups, no auth
+# hardening) and MUST NOT be used in production. In production, set
+# devDependencies.enabled=false and point datastores.* at the Terraform-managed
+# RDS/ElastiCache/Qdrant instead. See this chart's README.
+#
+# Images are pinned to exactly what docker-compose.yml uses.
+# ---------------------------------------------------------------------------
+devDependencies:
+  enabled: false
+  postgres:
+    image: postgres:16-alpine
+    # Local placeholder credentials, identical to docker-compose.yml's dev
+    # defaults — NOT a production secret. The database is ephemeral and never
+    # exposed outside the cluster.
+    user: platform
+    password: platform
+    database: platform
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
+  redis:
+    image: redis:7-alpine
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+  qdrant:
+    # Kept in lockstep with the pinned qdrant-client (ADR 0012).
+    image: qdrant/qdrant:v1.18.1
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 512Mi

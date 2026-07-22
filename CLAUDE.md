@@ -3,24 +3,24 @@
 Read at the start of every session. Keep under ~150 lines. Facts only — rationale
 lives in `docs/adr/`.
 
-## Current state — **Stage 6 of 10 (MLOps), COMPLETE.** Version `0.1.0`
+## Current state — **Stage 7 of 10 (Kubernetes), COMPLETE.** Version `0.1.0`
 
 `POST /v1/chat/completions` runs a **real LangGraph agent loop against the Anthropic
 API** (`claude-opus-4-8`): reason → tool → observe → answer, bounded by `agent_max_steps`;
 real usage summed across calls. History persists to Postgres behind a Redis cache with a
-`conversation_id`, else stateless. **Stage 4 grounds answers:** corpus (`data/corpus/`)
-ingested (LlamaIndex → Voyage → **Qdrant**); `document_search` retrieves passages, response
-gains top-level **`citations`** — retrieval is one more `Tool`, routes/SSE/`CompletionEngine`/
-`LLMClient` **unchanged**. **Stage 5:** every `@traced` site emits an **OTel span** + a FastAPI
-root span → OTLP/HTTP → **Collector → Tempo**; Grafana dashboard + symptom alerts as code;
-metrics stay on Prometheus (traces only, ADR 0016). **Stage 6:** `Evaluator` implemented — RAG
-eval via `scripts/evaluate.py` (operator/CI, **not a boot hook**): **Tier 1** recall@k/MRR over
-offline-hash embeddings + in-memory cosine = **required hermetic CI regression gate** vs
-`data/eval/baseline.json`; **Tier 2** LLM-as-judge opt-in/billable, never CI (ADR 0017). **No
-auth** — stub (Stage 8).
+`conversation_id`, else stateless. **Stage 4 grounds answers:** corpus ingested (LlamaIndex →
+Voyage → **Qdrant**); `document_search` adds top-level **`citations`** — one more `Tool`,
+routes/SSE/`CompletionEngine`/`LLMClient` **unchanged**. **Stage 5:** `@traced` emits **OTel
+spans** + FastAPI root span → **Collector → Tempo**; Grafana dashboard + alerts as code; metrics
+stay on Prometheus (traces only, ADR 0016). **Stage 6:** RAG eval via
+`scripts/evaluate.py` (operator/CI, **not a boot hook**): **Tier 1** recall@k/MRR (offline-hash +
+in-memory cosine) = **hermetic CI gate** vs `data/eval/baseline.json`; **Tier 2** judge
+opt-in/billable, never CI (ADR 0017). **Stage 7:** `api` deploys to **K8s via Helm** (probes →
+`/health`/`/ready`, verified on **`kind`**); **Terraform** (AWS) **validated, never applied**;
+dev-vs-managed datastores gated by `devDependencies.enabled` (ADR 0018). **No auth** — stub (Stage 8).
 
-Roadmap **`docs/PROJECT_STATUS.md`** (canonical). Detail `docs/stage-summaries/stage-0{1..6}.md`.
-Rationale **`docs/adr/`** 0001-0017 (index in `docs/adr/README.md`); 0017 = RAG eval + gate.
+Roadmap **`docs/PROJECT_STATUS.md`** (canonical). Detail `docs/stage-summaries/stage-0{1..7}.md`.
+Rationale **`docs/adr/`** 0001-0018 (index in `docs/adr/README.md`); 0018 = K8s/Helm + Terraform.
 
 ## Layout
 
@@ -134,7 +134,7 @@ Endpoints: `/health` `/ready` `/version` `/metrics` `/docs` · `POST /v1/chat/co
 
 | Stage | Deferred |
 |:--:|---|
-| 7 | K8s manifests, Terraform · **8** Auth, guardrails, rate limiting, RAG injection hardening — **API unauthenticated** |
+| 8 | Auth, guardrails, rate limiting, RAG injection hardening — **API unauthenticated** |
 | 9 | Load/chaos testing, SLOs, **OTel metrics export** (traces-only shipped, ADR 0016), pool tuning, circuit breaking, prompt caching, context compaction · **10** Portfolio polish |
 
 ## Known issues

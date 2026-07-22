@@ -1,0 +1,17 @@
+# Terraform local state, provider plugins, and secret var files.
+# The committed artifacts are the .tf source and terraform.tfvars.example only.
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+# Real var files may hold environment specifics — never commit them.
+terraform.tfvars
+*.auto.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc

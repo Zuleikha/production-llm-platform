@@ -1,0 +1,20 @@
+{{ .Chart.Name }} {{ .Chart.AppVersion }} deployed as release "{{ .Release.Name }}".
+
+Profile (ENVIRONMENT): {{ .Values.env.ENVIRONMENT }}
+Replicas: {{ if .Values.autoscaling.enabled }}{{ .Values.autoscaling.minReplicas }}-{{ .Values.autoscaling.maxReplicas }} (HPA){{ else }}{{ .Values.replicaCount }}{{ end }}
+Dev in-cluster datastores: {{ if .Values.devDependencies.enabled }}ENABLED (dev only — not for production){{ else }}disabled (expects external managed datastores){{ end }}
+
+Check rollout:
+  kubectl rollout status deployment/{{ include "production-llm-platform.fullname" . }}
+
+Port-forward and probe:
+  kubectl port-forward svc/{{ include "production-llm-platform.fullname" . }} 8000:{{ .Values.service.port }}
+  curl http://localhost:8000/health
+  curl http://localhost:8000/ready
+{{- if not .Values.devDependencies.enabled }}
+
+NOTE: devDependencies.enabled is false, so this release expects
+DATABASE_URL / REDIS_URL / QDRANT_URL to point at external managed datastores
+(the ones Terraform provisions). Under the `prod` profile the API refuses to
+boot until those URLs and both API keys are supplied.
+{{- end }}

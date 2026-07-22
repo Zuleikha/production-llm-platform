@@ -15,6 +15,11 @@ env:
   # Pinned to match the local toolchain and the Dockerfile (see ADR 0001).
   UV_VERSION: "0.11.28"
   PYTHON_VERSION: "3.12"
+  # Stage 7 infra toolchain (ADR 0018).
+  HELM_VERSION: "v3.16.4"
+  TERRAFORM_VERSION: "1.10.5"
+  CHART_DIR: infrastructure/kubernetes/helm/production-llm-platform
+  TERRAFORM_DIR: infrastructure/terraform
 
 jobs:
   quality:
@@ -272,3 +277,124 @@ jobs:
       - name: Tear down
         if: always()
         run: docker rm -f api-ci api-ci-test || true
+
+  helm:
+    name: Helm lint + render
+    runs-on: ubuntu-latest
+
+    # Hermetic — no cluster. `helm lint` catches schema/template errors and
+    # `helm template` proves the chart renders to valid manifests, spot-checking
+    # the probe paths land on /health and /ready (ADR 0018).
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: helm lint
+        run: helm lint "$CHART_DIR"
+
+      - name: helm template (default / prod)
+        run: helm template ci "$CHART_DIR" > /tmp/rendered-prod.yaml
+
+      - name: helm template (dev datastores enabled)
+        run: |
+          helm template ci "$CHART_DIR" \
+            --set devDependencies.enabled=true \
+            --set secrets.anthropicApiKey=ci-not-a-real-key \
+            --set secrets.voyageApiKey=ci-not-a-real-key \
+            > /tmp/rendered-dev.yaml
+
+      - name: Spot-check rendered probe paths and port
+        run: |
+          set -euo pipefail
+          grep -q 'path: /health' /tmp/rendered-dev.yaml
+          grep -q 'path: /ready' /tmp/rendered-dev.yaml
+          grep -q 'containerPort: 8000' /tmp/rendered-dev.yaml
+
+  terraform:
+    name: Terraform fmt + validate
+    runs-on: ubuntu-latest
+
+    # Hermetic — no AWS credentials. `validate` and `fmt -check` never contact
+    # AWS; `init -backend=false` only downloads the provider schema. `plan`/`apply`
+    # are deliberately never run (no account exists) — ADR 0018.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: terraform fmt -check
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: terraform fmt -check -recursive
+
+      - name: terraform init (no backend, no creds)
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: terraform init -backend=false -input=false
+
+      - name: terraform validate
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: terraform validate
+
+  kind-deploy:
+    name: kind deploy + /ready verification
+    runs-on: ubuntu-latest
+
+    # The Helm equivalent of the docker job's "container boot is required" bar
+    # (ADR 0018): stand up a real kind cluster, install the chart with the
+    # in-cluster dev datastores, and assert /ready genuinely reports every store
+    # `ok` — a render check alone would not prove the deployment works. Hermetic:
+    # placeholder API keys, no external services, no secrets, no cost. The prod
+    # profile validates the keys are present, not valid; /ready calls no provider.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Build api image
+        run: docker build -t production-llm-platform/api:ci .
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: pllm-ci
+
+      - name: Load image into kind
+        run: kind load docker-image production-llm-platform/api:ci --name pllm-ci
+
+      - name: helm install (dev datastores)
+        run: |
+          helm install ci-api "$CHART_DIR" \
+            --set image.tag=ci \
+            --set devDependencies.enabled=true \
+            --set secrets.anthropicApiKey=ci-not-a-real-key \
+            --set secrets.voyageApiKey=ci-not-a-real-key
+
+      - name: Wait for rollouts
+        run: |
+          set -euo pipefail
+          for d in "" -postgres -redis -qdrant; do
+            kubectl rollout status "deployment/ci-api-production-llm-platform$d" --timeout=180s
+          done
+
+      - name: Verify /ready reports every datastore ok
+        run: |
+          set -euo pipefail
+          kubectl port-forward svc/ci-api-production-llm-platform 8000:8000 &
+          pf=$!
+          sleep 5
+          body=$(curl -fsS http://localhost:8000/ready | tee /dev/stderr)
+          kill "$pf" || true
+          echo "$body" | grep -q '"status":"ready"'
+          echo "$body" | grep -q '"postgres":"ok"'
+          echo "$body" | grep -q '"redis":"ok"'
+          echo "$body" | grep -q '"qdrant":"ok"'
+
+      - name: Pod state (always)
+        if: always()
+        run: kubectl get pods -o wide || true

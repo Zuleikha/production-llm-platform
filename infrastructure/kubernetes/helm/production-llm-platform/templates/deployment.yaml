@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "production-llm-platform.fullname" . }}
+  labels:
+    {{- include "production-llm-platform.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "production-llm-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      annotations:
+        # Roll pods when the rendered config/secret changes.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "production-llm-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.devDependencies.enabled }}
+      # The app connects to its datastores once at startup and, by design, a
+      # store that fails to connect then stays `unavailable` until the pod
+      # restarts (a documented limitation — startup never raises). Kubernetes
+      # starts pods in parallel with no ordering, so without this gate the API
+      # can lose the race against the in-cluster datastores initialising and
+      # come up permanently not-ready. docker-compose solves the same race with
+      # `depends_on: service_healthy`; this initContainer is its equivalent.
+      # Only needed for the dev datastores whose hosts the chart knows; in
+      # production the managed datastores pre-exist the deploy.
+      initContainers:
+        - name: wait-for-datastores
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command:
+            - python
+            - -c
+            - |
+              import socket, time
+              targets = [
+                  ("{{ include "production-llm-platform.fullname" . }}-postgres", 5432),
+                  ("{{ include "production-llm-platform.fullname" . }}-redis", 6379),
+                  ("{{ include "production-llm-platform.fullname" . }}-qdrant", 6333),
+              ]
+              for host, port in targets:
+                  while True:
+                      try:
+                          with socket.create_connection((host, port), timeout=2):
+                              print(host + ":" + str(port) + " reachable", flush=True)
+                          break
+                      except OSError as exc:
+                          print("waiting for " + host + ":" + str(port) + " (" + str(exc) + ")", flush=True)
+                          time.sleep(2)
+      {{- end }}
+      containers:
+        - name: api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "production-llm-platform.fullname" . }}-config
+            - secretRef:
+                name: {{ include "production-llm-platform.fullname" . }}-secret
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

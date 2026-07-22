@@ -1,0 +1,6 @@
+# Normalize line endings to LF for all text files, regardless of OS.
+# This repo is developed on Windows (D: drive) — without this, editors/tools
+# that write CRLF cause every line of a touched file to show as changed in
+# git diffs, even when content is identical. See docs/adr/ for context if a
+# future stage needs an exception for a specific file type.
+* text=auto eol=lf

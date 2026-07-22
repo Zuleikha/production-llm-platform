@@ -1,0 +1,26 @@
+apiVersion: v2
+name: production-llm-platform
+description: >-
+  Helm chart for the production-llm-platform `api` service — the FastAPI app
+  built by the repo Dockerfile, with liveness/readiness probes wired to
+  /health and /ready. Optional dev-only in-cluster Postgres/Redis/Qdrant let a
+  local kind cluster reach /ready end-to-end; production points the datastore
+  URLs at the managed services Terraform provisions (see infrastructure/terraform).
+type: application
+
+# Chart version — the version of the packaging, bumped when templates change.
+version: 0.1.0
+
+# The application version this chart deploys. Kept in lockstep with the image
+# tag in values.yaml and the repo's shared/version.py.
+appVersion: "0.1.0"
+
+keywords:
+  - fastapi
+  - llm
+  - kubernetes
+home: https://github.com/production-llm-platform
+sources:
+  - https://github.com/production-llm-platform
+maintainers:
+  - name: production-llm-platform

@@ -38,7 +38,7 @@ tracing without touching any of it.
 
 ---
 
-## Current state (Stage 6 — built and verified)
+## Current state (Stage 7 — built and verified)
 
 ### Component map
 
@@ -439,6 +439,45 @@ Prometheus + three Tempo trace tables) and three symptom-level alert rules
 (error rate > 5%, chat p99 > 30s, `/ready` 503) via Grafana-native unified
 alerting — no Alertmanager container (ADR 0016).
 
+### Deployment topology (Kubernetes / Helm, Stage 7)
+
+Compose is the local dev stack; **Kubernetes is the deployment target** (ADR
+0018). The `api` service is packaged as a **Helm chart**
+(`infrastructure/kubernetes/helm/production-llm-platform/`), not raw manifests, so
+one templated source covers every environment via `values.yaml`.
+
+- **Deployment** — configurable `replicaCount`, non-root pod, resource
+  requests/limits, an `envFrom` of a **ConfigMap** (non-secret settings) and a
+  **Secret** (datastore URLs + API keys, injected at install, never committed).
+- **Probes wired to the real endpoints** — `livenessProbe → /health` (touches no
+  datastore; a DB blip must not restart the pod), `readinessProbe → /ready`
+  (probes every store, 503s when one is down so the kubelet routes traffic away).
+  This is the kubelet-driven readiness that finally arms the `/ready` alert (ADR
+  0016).
+- **Service** (ClusterIP :8000), optional **HorizontalPodAutoscaler**.
+
+**The datastore split is explicit and enforced by a flag:**
+
+- **Production** points `DATABASE_URL`/`REDIS_URL`/`QDRANT_URL` at the **managed
+  services Terraform provisions** — RDS (Postgres), ElastiCache (Redis), Qdrant —
+  with `devDependencies.enabled=false`.
+- **Local `kind`** sets `devDependencies.enabled=true`, which deploys minimal,
+  **ephemeral, dev-only** in-cluster Postgres/Redis/Qdrant (same images as
+  compose) so `/ready` can reach `ok` end-to-end with no cloud account. An
+  initContainer waits for those stores before the API starts, since the app
+  connects once at boot and Kubernetes has no compose-style `depends_on`. These
+  are **never** the production path.
+
+**Terraform** (`infrastructure/terraform/`, AWS) provisions the cloud
+infrastructure — modules for networking (VPC), cluster (EKS), Postgres (RDS),
+Redis (ElastiCache), object storage (S3), and secrets (Secrets Manager
+*references*, no values). It is **validated, never applied**: `terraform init`
+(local backend) + `validate` + `fmt -check` are the CI-safe gate; `plan`/`apply`
+need real AWS credentials this project does not have and are deliberately out of
+scope — the same treatment paid LLM APIs already get (ADR 0018). No secret value
+lives in Terraform: the RDS password is RDS-managed in Secrets Manager, and app
+keys are empty Secrets Manager containers populated out-of-band.
+
 ### Evaluation and the regression gate (Stage 6)
 
 The RAG retrieval pipeline has a real evaluation harness (`services/evaluation/`,
@@ -487,14 +526,13 @@ builds it.
 
 | Component | Stage | Status today |
 |-----------|-------|--------------|
-| `infrastructure/kubernetes`, `infrastructure/terraform` | 7 | **Empty placeholders.** Compose only today. |
 | `services/security` — `AuthProvider`, `Guardrail` | 8 | **Not implemented.** API is entirely unauthenticated. |
 | Reliability — load testing, chaos, SLOs, pool tuning, reconnect/circuit breaking, **OTel metrics export** | 9 | **Nothing exists.** |
 
 ### Deliberate non-goals as of Stage 6
 
-**No authentication** (the corpus and the API are both unauthenticated — Stage 8),
-no Kubernetes. **Metrics are not exported through the OTel collector** — the
+**No authentication** (the corpus and the API are both unauthenticated — Stage 8).
+**Metrics are not exported through the OTel collector** — the
 collector carries traces only, and metrics stay on Prometheus scraping `/metrics`
 (a deliberate scope cut, ADR 0016), so Grafana's service-map and node-graph views
 are switched off rather than left rendering "No data"; building that metrics-from-
