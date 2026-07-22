@@ -33,6 +33,9 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
+          # Distinct cache key per job (github.job = quality / eval) so the two
+          # jobs don't race to reserve one shared key when running concurrently.
+          cache-suffix: ${{ github.job }}
 
       - name: Set up Python
         run: uv python install ${{ env.PYTHON_VERSION }}
@@ -77,6 +80,9 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
+          # Distinct cache key per job (github.job = quality / eval) so the two
+          # jobs don't race to reserve one shared key when running concurrently.
+          cache-suffix: ${{ github.job }}
 
       - name: Set up Python
         run: uv python install ${{ env.PYTHON_VERSION }}
