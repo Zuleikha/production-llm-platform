@@ -129,6 +129,19 @@ Endpoints: `/health` `/ready` `/version` `/metrics` `/docs` · `POST /v1/chat/co
   `docker-compose.yml`; check `docker ps` for collisions first. **Docker Desktop must be
   running** for live-datastore/Qdrant tests — `docker ps` is the real check, not
   `docker compose version`.
+- **`.git/index.lock` strands = two git actors racing the index, not a code bug.** A recurring
+  **0-byte** `index.lock` with **no `git.exe` alive** means a git process created the lock
+  (`O_CREAT|O_EXCL`) but was hard-killed before writing+releasing it — normal error-exit removes
+  it, only `TerminateProcess` strands it. Contributors on this machine: **(1)** the Claude Code
+  **harness polls `git status` in the background** (index stat-refresh takes `index.lock`), and
+  **(2)** a standalone **Git Bash window opened in the repo** (`--cd=…production-llm-platform`).
+  When either races a CC `add`/`commit`, you get "Another git process seems to be running…
+  index.lock: File exists". **Rule: one git actor at a time on this repo** — close or stay off
+  that Git Bash window while CC commits; if CC's harness exposes a pause for background git
+  polling, use it during commits. Recovery: with **no `git.exe` running**, deleting the 0-byte
+  lock is safe. This is **separate from** the Stage-7 Defender issue (`tmp_obj_*` strand +
+  "Operation not permitted" on unlink — that was on-access scanning, fixed by the folder
+  exclusion above); both can surface together but have different causes.
 
 ## Deferred — do NOT build early
 
