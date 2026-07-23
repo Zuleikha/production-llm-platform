@@ -25,6 +25,49 @@ if TYPE_CHECKING:
 
     from services.orchestrator.conversations import Turn
 
+# --- Stage 8 security test fixtures (ADR 0019) ---
+# OBVIOUSLY-FAKE, test-only credential material. Mirrors config/environments/
+# test.env: the raw key hashed with the pepper below yields the stored hash there.
+# Never a real credential — see .gitleaks.toml for the scanning allowlist.
+TEST_API_KEY = "test-key-not-a-real-secret"
+TEST_PRINCIPAL = "test-principal"
+TEST_HASH_SECRET = "test-pepper-not-a-real-secret"
+AUTH_HEADERS = {"Authorization": f"Bearer {TEST_API_KEY}"}
+
+
+class FakeEvalRedis:
+    """A Redis stand-in exposing just ``eval``, for the rate limiter.
+
+    Backed by an in-memory per-key counter — enough to exercise the limiter's
+    ``INCR``+``EXPIRE`` Lua script under/at/over threshold, and to fail on demand
+    so the fail-open path is testable. It does **not** honour the TTL: a test
+    about the window *expiring* would need a real Redis.
+    """
+
+    def __init__(self, *, fails: bool = False) -> None:
+        self.counters: dict[str, int] = {}
+        self.fails = fails
+        self.eval_calls = 0
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> int:
+        self.eval_calls += 1
+        if self.fails:
+            raise ConnectionError("redis is down")
+        key = str(keys_and_args[0])
+        self.counters[key] = self.counters.get(key, 0) + 1
+        return self.counters[key]
+
+
+class FakeRedisSource:
+    """A ``RedisSource`` whose ``redis_client`` is a :class:`FakeEvalRedis` or None."""
+
+    def __init__(self, client: FakeEvalRedis | None) -> None:
+        self._client = client
+
+    @property
+    def redis_client(self) -> FakeEvalRedis | None:
+        return self._client
+
 
 class FakeDatastore(Datastore):
     """A Datastore whose ping/connect behaviour is dictated by the test."""

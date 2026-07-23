@@ -16,9 +16,7 @@
 # Credentials below are LOCAL DEV PLACEHOLDERS ONLY, overridable via .env.
 # Production secrets are injected by the deployment platform, never committed.
 # ---------------------------------------------------------------------------
-
 name: production-llm-platform
-
 services:
   api:
     build:
@@ -49,6 +47,13 @@ services:
       # agent answers ungrounded. Needed by `scripts/ingest.py` too — that is
       # what actually spends the money.
       VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
+      # Stage 8 auth. Passed through from the host shell, same rule as the two
+      # above — never hardcoded here. API_KEYS holds principal:hexhash pairs;
+      # API_KEY_HASH_SECRET is the server-side pepper HMAC'd into each key.
+      # Required under prod; dev/test boot fine without them but every request
+      # 401s until they're set.
+      API_KEYS: ${API_KEYS:-}
+      API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-}
       # Where @traced sends its spans (Stage 5, ADR 0016). Unset = never dialled
       # and the service runs untraced, so this is what turns tracing on. Not a
       # secret and not a boot requirement — a missing collector must not stop the
@@ -67,7 +72,6 @@ services:
       otel-collector:
         condition: service_started
     networks: [platform]
-
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -85,7 +89,6 @@ services:
       timeout: 3s
       retries: 10
     networks: [platform]
-
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -100,7 +103,6 @@ services:
       timeout: 3s
       retries: 10
     networks: [platform]
-
   qdrant:
     # Kept in lockstep with the pinned `qdrant-client` (1.18.0): the client warns
     # and may misbehave when the server's minor version is more than one away.
@@ -114,7 +116,6 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
     networks: [platform]
-
   # --- Tracing (Stage 5, ADR 0016) -----------------------------------------
   # api --OTLP/http:4318--> otel-collector --OTLP/grpc:4317--> tempo <-- grafana
   #
@@ -135,7 +136,6 @@ services:
     depends_on:
       - tempo
     networks: [platform]
-
   tempo:
     image: grafana/tempo:2.6.1
     restart: unless-stopped
@@ -147,7 +147,6 @@ services:
     ports:
       - "3200:3200"   # HTTP — Grafana's datasource and the trace-search API
     networks: [platform]
-
   prometheus:
     image: prom/prometheus:v2.55.0
     restart: unless-stopped
@@ -162,7 +161,6 @@ services:
     depends_on:
       - api
     networks: [platform]
-
   grafana:
     image: grafana/grafana:11.3.0
     restart: unless-stopped
@@ -181,11 +179,9 @@ services:
       - prometheus
       - tempo
     networks: [platform]
-
 networks:
   platform:
     driver: bridge
-
 volumes:
   postgres_data:
   redis_data:

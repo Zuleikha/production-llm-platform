@@ -45,7 +45,7 @@ from services.retrieval.base import RetrievedDocument
 from services.retrieval.embeddings import HashingEmbeddingsClient
 from services.retrieval.tool import DocumentSearch
 
-from tests.fakes import FakeRedis, InMemoryConversationStore, StubRetriever
+from tests.fakes import AUTH_HEADERS, FakeRedis, InMemoryConversationStore, StubRetriever
 
 if TYPE_CHECKING:
     from shared.config import Settings
@@ -96,7 +96,7 @@ def _client_with(settings: Settings, tools: ToolRegistry, *turns: AssistantTurn)
     store = CachedConversationStore(InMemoryConversationStore(), FakeRedis(), ttl_seconds=60)
     graph = AgentGraph(ScriptedLLMClient(turns), tools=tools)
     engine = OrchestratorEngine(AgentOrchestrator(graph, store))
-    return TestClient(create_app(settings, engine=engine))
+    return TestClient(create_app(settings, engine=engine), headers=AUTH_HEADERS)
 
 
 class TestCitationsReachTheClient:

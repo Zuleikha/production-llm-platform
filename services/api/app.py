@@ -33,6 +33,9 @@ from services.orchestrator.graph import AgentGraph
 from services.orchestrator.llm import build_llm_client
 from services.retrieval.retriever import build_retriever
 from services.retrieval.tool import DocumentSearch
+from services.security.auth import build_auth_provider
+from services.security.guardrails import InjectionPatternGuardrail, UserInputGuardrail
+from services.security.rate_limit import build_rate_limiter
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -54,8 +57,12 @@ def _build_tools(settings: Settings, registry: DatastoreRegistry) -> ToolRegistr
     if retriever is None:
         _logger.info("retrieval.tool_disabled", extra={"reason": "qdrant not available"})
         return tools
+    # Stage 8: a heuristic injection screen over retrieved excerpts (ADR 0019).
+    # Defense-in-depth telemetry only — it never drops an excerpt, and the ADR
+    # 0014 nonce fence remains the load-bearing mitigation.
+    screen = InjectionPatternGuardrail() if settings.retrieval_guardrail_enabled else None
     _logger.info("retrieval.tool_enabled", extra={"collection": settings.qdrant_collection})
-    return tools.with_tools(DocumentSearch(retriever))
+    return tools.with_tools(DocumentSearch(retriever, screen=screen))
 
 
 @traced
@@ -131,6 +138,14 @@ def create_app(
     # Built before startup so the dependency is resolvable even if a probe runs
     # before the lifespan has finished connecting.
     app.state.datastores = DatastoreRegistry.from_settings(settings)
+    # --- Stage 8 security components (ADR 0019) ---
+    # All local logic with no paid external hop, so they are constructed here
+    # (before the lifespan) and work identically under every profile. The rate
+    # limiter reads registry.redis_client at call time, so it tolerates Redis
+    # connecting later in the lifespan (or never — it fails open).
+    app.state.auth_provider = build_auth_provider(settings)
+    app.state.rate_limiter = build_rate_limiter(settings, app.state.datastores)
+    app.state.input_guardrail = UserInputGuardrail() if settings.input_guardrail_enabled else None
     app.state.engine_overridden = engine is not None
     # A caller who never enters the lifespan still gets a working engine rather
     # than an AttributeError — it just has no persistence, because the pools are

@@ -6,13 +6,13 @@ Every stage prompt references this file. Update it at the end of each stage.
 | | |
 |---|---|
 | **Current version** | `0.1.0` |
-| **Current stage** | Stage 7 — Kubernetes (**complete**) |
-| **Overall progress** | **7 / 10 stages — 70%** |
-| **Next milestone** | Stage 8 — Security |
-| **Last updated** | 2026-07-21 |
+| **Current stage** | Stage 8 — Security (**complete**) |
+| **Overall progress** | **8 / 10 stages — 80%** |
+| **Next milestone** | Stage 9 — Reliability |
+| **Last updated** | 2026-07-23 |
 
 ```
-Progress  [███████───]  7/10
+Progress  [████████──]  8/10
 ```
 
 ---
@@ -85,13 +85,13 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
 | 4 | RAG | [stage-04-rag.md](stage-summaries/stage-04-rag.md) | [stage-04-rag.md](verification-log/stage-04-rag.md) | 2026-07-16 |
 | 5 | Observability | [stage-05-observability.md](stage-summaries/stage-05-observability.md) | _pending independent verification_ | 2026-07-18 |
 | 6 | MLOps | [stage-06-mlops.md](stage-summaries/stage-06-mlops.md) | _pending independent verification_ | 2026-07-20 |
-| 7 | Kubernetes | [stage-07-kubernetes.md](stage-summaries/stage-07-kubernetes.md) | _pending independent verification_ | 2026-07-21 |
+| 7 | Kubernetes | [stage-07-kubernetes.md](stage-summaries/stage-07-kubernetes.md) | [stage-07-kubernetes.md](verification-log/stage-07-kubernetes.md) | 2026-07-21 |
+| 8 | Security | [stage-08-security.md](stage-summaries/stage-08-security.md) | [stage-08-security.md](verification-log/stage-08-security.md) | 2026-07-23 |
 
 ## Remaining stages
 
 | Stage | Name | Summary file (fixed) | Objective |
 |:-----:|------|----------------------|-----------|
-| 8 | Security | `stage-08-security.md` | AuthN/AuthZ, input/output guardrails, rate limiting, secret management, security scanning |
 | 9 | Reliability | `stage-09-reliability.md` | Load testing, chaos/failure testing, SLOs, resilience patterns |
 | 10 | Portfolio | `stage-10-portfolio.md` | Final polish, docs, demos, case study writeup |
 
@@ -193,18 +193,38 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
   (local backend) + `validate` + `fmt -check` pass and are the CI-safe gate;
   `plan`/`apply` need real AWS credentials this project does not have and are a
   deliberate scope boundary (ADR 0018).
-- **Quality gate** — ruff, ruff-format, mypy `strict`, pytest (311 tests, plus
-  opt-in live-datastore / live-Qdrant / live-provider layers that skip by
-  default), pre-commit; GitHub Actions runs all of it plus the hermetic Tier 1
-  eval regression gate and a Docker build against live postgres/redis/qdrant
-  service containers, asserting `/ready` reports every store `ok` and that chat +
-  SSE work. **Stage 7 adds three hermetic infra jobs**: `helm lint`/`template`, a
-  `terraform fmt -check`/`validate` gate, and a `kind` job that installs the chart
-  with dev datastores and curls `/ready` inside the runner.
+- **Quality gate** — ruff, ruff-format, mypy `strict`, pytest (**362 tests**, up
+  from the Stage 7 baseline of 311, plus opt-in live-datastore / live-Qdrant /
+  live-provider layers that skip by default), pre-commit; GitHub Actions runs all
+  of it plus the hermetic Tier 1 eval regression gate and a Docker build against
+  live postgres/redis/qdrant service containers, asserting `/ready` reports every
+  store `ok` and that authenticated chat + SSE work (and that a missing key `401`s).
+  **Stage 7 added three hermetic infra jobs** (`helm lint`/`template`, `terraform
+  fmt`/`validate`, and a `kind` deploy). **Stage 8 adds two hermetic security jobs**:
+  a **gitleaks** secret scan and a **pip-audit** dependency-vulnerability scan, both
+  pinned (ADR 0019).
+- **API authentication + rate limiting (Stage 8)** — `POST /v1/chat/completions`
+  requires `Authorization: Bearer <key>`; only a salted `HMAC-SHA256(pepper, key)`
+  is stored, compared constant-time, and missing/malformed/wrong keys all return
+  the **same** `401` in the uniform envelope. A Redis-backed, per-principal rate
+  limiter (atomic Lua `INCR`+`EXPIRE`) returns `429` over the threshold and
+  **fails open + logs** on a Redis outage (ADR 0008/0019). `/health`, `/ready`,
+  `/version`, `/metrics` stay unauthenticated by design (probe/scrape paths). The
+  `prod` profile now also refuses to boot without `API_KEYS` + `API_KEY_HASH_SECRET`.
+- **RAG-hardening guardrails on top of the ADR 0014 nonce fence (Stage 8)** — a
+  heuristic **input** guardrail screens the user turn (blocks direct
+  instruction-override / system-prompt-extraction → `400`, logs persona/PII only);
+  an **excerpt** guardrail flags injection-shaped retrieved text (log-only, never
+  drops); an **answer-egress** check flags leaked fence markers or echoed preamble
+  (log-only). The nonce fence stays the load-bearing mitigation (ADR 0019).
+- **Two hermetic security CI gates (Stage 8)** — **gitleaks** (`v8.30.1`, pinned)
+  scans the tree against a `.gitleaks.toml` that allowlists only documented fake
+  test fixtures, and **pip-audit** (`==2.9.0`, pinned) audits the exported
+  `uv.lock`. Both are free, key-free, and fail the build on a finding (ADR 0019).
 
 ### ❌ Does not exist yet
 
-**No authentication** (the corpus and API are both unauthenticated) · no load
+no load
 testing · **no OTel metrics pipeline** — the
 collector carries traces only and metrics stay on Prometheus (deliberate scope
 cut, ADR 0016), so Grafana's service-map / node-graph views are switched off
@@ -218,9 +238,13 @@ All three datastores now hold real data — Postgres (conversation history), Red
 
 Retrieval is deliberately minimal: no reranking, no hybrid search, no query
 expansion, no automatic re-ingestion (an operator runs `scripts/ingest.py`), and
-editing a document shorter leaves orphaned tail chunks (ADR 0012). The
-prompt-injection mitigation is delimiting + labelling, not full hardening — no
-classifier, no trust tiers, no egress filtering (ADR 0014, Stage 8).
+editing a document shorter leaves orphaned tail chunks (ADR 0012). Prompt-injection
+defense is the ADR 0014 nonce fence plus Stage 8's heuristic input/excerpt/egress
+guardrails (ADR 0019) — still **no ML classifier and no per-source trust tiers**;
+those wait on the corpus-admission model changing. Authentication is **API-key
+only** — no JWT/OAuth/IdP, no rotation/expiry beyond editing `API_KEYS`, single-tier
+authZ, and the rate limiter fails open on a Redis outage (all deferred by decision,
+ADR 0019). Secret management is **CI-scanning only** — no runtime secrets backend.
 
 Within the agent stack, deliberately deferred: prompt caching, context
 compaction (a long enough conversation will exceed the context window and fail),
@@ -232,18 +256,26 @@ no endpoint returns a collection yet. Revisit when one does.
 
 ---
 
-## Next milestone — Stage 8 (Security)
+## Next milestone — Stage 9 (Reliability)
 
-**Objective:** authentication/authorization, input/output guardrails, rate
-limiting, secret management, and security scanning — the API is unauthenticated
-today, and the retrieval prompt-injection mitigation is delimiting + labelling
-only (ADR 0014), not full hardening.
+**Objective:** load testing, chaos/failure testing, SLOs, and resilience patterns
+(pool tuning, reconnect/circuit breaking, prompt caching, context compaction), plus
+the deferred **OTel metrics export** pipeline. Stage 8's rate-limiter fail-open and
+the absence of retry/circuit-breaking around the provider calls are the reliability
+surfaces Stage 9 owns.
 
-**Prerequisites** (all met as of Stage 7): a real deployment target — the API
-runs on Kubernetes via Helm with probes wired to `/health`/`/ready`, verified on
-`kind` (ADR 0018) — and Terraform's Secrets Manager references give auth/rate-limit
-config a place to source secrets from. The unauthenticated API and the untrusted
-corpus (ADR 0014) are the surfaces Stage 8 hardens.
+**Resolved in Stage 8:** the API is authenticated. `POST /v1/chat/completions`
+requires a bearer API key (salted-hash store, constant-time compare, one uniform
+`401`); a Redis-backed per-principal rate limiter returns `429` and fails open +
+logs on a Redis outage; the three exempt endpoints (`/health`, `/ready`, `/version`,
+`/metrics`) stay unauthenticated by design. Two heuristic RAG-hardening guardrails
+(input screen that blocks direct override/probe → `400`; log-only excerpt screen)
+and a log-only answer-egress check sit on top of the unchanged ADR 0014 nonce fence.
+Two hermetic CI gates were added — **gitleaks** (secret scan) and **pip-audit**
+(dependency scan), both pinned. The `prod` validator now also requires `API_KEYS` +
+`API_KEY_HASH_SECRET`, and the Helm chart wires them into its Secret (ADR 0019).
+Deferred by decision: JWT/OAuth/external IdP, role/scope authZ, per-source trust
+tiering, and a runtime cloud secrets backend.
 
 **Resolved in Stage 7:** deployment moved off compose-only. The `api` image
 deploys to Kubernetes through a Helm chart with liveness/readiness probes on
@@ -278,9 +310,9 @@ and the Voyage embeddings API and asserts the response shapes the code assumes.
 It is not run in CI (CI stays key-free and hermetic) — a human runs it
 deliberately when changing `llm.py` or `embeddings.py`.
 
-**Note carried to Stage 8 (security):** the retrieval prompt-injection mitigation
-shipped in Stage 4 is delimiting + labelling only (ADR 0014). It removes
-ambiguity about what is data but is not immunity, and there is no classifier,
-trust tiering, or answer egress filtering. Widening what can enter the corpus
-(user uploads, crawls, third-party feeds) changes the threat model and must
-revisit ADR 0014.
+**Resolved in Stage 8 (was the Stage 4 carry-forward):** the ADR 0014 nonce fence
+stays the load-bearing injection mitigation, and Stage 8 added a heuristic excerpt
+screen and a log-only answer-egress check on top (ADR 0019). Still deferred, and
+still tied to the corpus-admission model changing (user uploads, crawls, third-party
+feeds): an ML classifier and **per-source trust tiering** — building those against
+an unchanged, committer-only corpus would be premature; revisit ADR 0014 if it changes.

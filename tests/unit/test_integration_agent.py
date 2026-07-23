@@ -37,7 +37,7 @@ from services.orchestrator.conversations import (
 from services.orchestrator.graph import AgentGraph
 from services.orchestrator.llm import AssistantTurn, ScriptedLLMClient, TokenUsage
 
-from tests.fakes import FakeRedis, InMemoryConversationStore
+from tests.fakes import AUTH_HEADERS, FakeRedis, InMemoryConversationStore
 
 if TYPE_CHECKING:
     from shared.config import Settings
@@ -88,7 +88,7 @@ class TestAgentEndToEnd:
         store = CachedConversationStore(inner, redis, ttl_seconds=60)
         llm = ScriptedLLMClient(turns)
         engine = OrchestratorEngine(AgentOrchestrator(AgentGraph(llm), store))
-        return TestClient(create_app(settings, engine=engine)), inner, redis
+        return TestClient(create_app(settings, engine=engine), headers=AUTH_HEADERS), inner, redis
 
     async def test_a_tool_using_run_answers_persists_and_caches(self, settings: Settings) -> None:
         client, inner, redis = self._build(settings, *_TOOL_RUN)
@@ -182,7 +182,7 @@ class TestAgentEndToEnd:
             )
         )
 
-        with TestClient(create_app(settings, engine=engine)) as client:
+        with TestClient(create_app(settings, engine=engine), headers=AUTH_HEADERS) as client:
             client.post(
                 _ENDPOINT,
                 json={

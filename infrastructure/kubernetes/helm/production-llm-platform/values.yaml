@@ -24,8 +24,9 @@ fullnameOverride: ""
 # --- Non-secret application settings (become a ConfigMap) ------------------
 # ENVIRONMENT drives the config profile (shared/config.py). Default `prod`:
 # this chart's purpose is production deployment. `prod` refuses to boot without
-# all three datastore URLs AND both API keys (ADR 0005/0006/0011) — set them
-# below / via --set, or use `dev` for a keyless local smoke test.
+# all three datastore URLs, both provider keys, AND the API-key auth material
+# (ADR 0005/0006/0011/0019) — set them below / via --set, or use `dev` for a
+# keyless local smoke test.
 env:
   ENVIRONMENT: prod
   LOG_FORMAT: json
@@ -88,12 +89,21 @@ datastores:
 # --- Secrets (become a Secret) ---------------------------------------------
 # BLANK by default and NEVER committed with real values. Inject at install:
 #   --set secrets.anthropicApiKey=sk-ant-... --set secrets.voyageApiKey=pa-...
+#   --set secrets.apiKeys=principal:hash --set secrets.apiKeyHashSecret=...
 # In a real cluster these come from an external secret store (e.g. the AWS
 # Secrets Manager references the Terraform secrets module wires up), not from a
 # values file on disk.
 secrets:
   anthropicApiKey: ""
   voyageApiKey: ""
+  # Stage 8 (ADR 0019): API-key authentication. `apiKeys` is a comma-separated
+  # list of `principal:hexhash` pairs — only the salted HMAC of each key is ever
+  # stored, never the raw key. `apiKeyHashSecret` is the server-side pepper HMAC'd
+  # into each key (services/security/auth.py). Both BLANK by default and REQUIRED
+  # under the prod profile (the app refuses to boot without them) — supply at
+  # install, never commit.
+  apiKeys: ""
+  apiKeyHashSecret: ""
 
 # --- Tracing (optional, ADR 0016) ------------------------------------------
 # OTLP/HTTP endpoint of an OTel collector, e.g. http://otel-collector:4318.

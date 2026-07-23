@@ -1,0 +1,52 @@
+# gitleaks configuration — Stage 8 secret scanning (ADR 0019).
+#
+# The CI "secret-scan" job runs:
+#     gitleaks dir . --config .gitleaks.toml --redact --no-banner
+# over a CLEAN checkout (tracked files only), so .venv / .env / gl/ never exist
+# there and the gate reflects the committed surface. The two allowlist sections
+# below serve two distinct, deliberately-narrow purposes:
+#
+#   * `paths`   — silence LOCAL-only scan noise. `gitleaks dir` walks the real
+#                 filesystem and does NOT honor .gitignore, so a developer running
+#                 the scan locally would otherwise hit the virtualenv, the caches,
+#                 and the downloaded scanner binary. All of these are gitignored
+#                 build/tooling artifacts, never a legitimate home for a committed
+#                 secret. NOTE: `.env` is deliberately NOT allowlisted here — it is
+#                 gitignored (real dev keys live there) but if it were ever
+#                 force-added the scanner MUST still catch it, so a local scan
+#                 correctly reports the real keys in .env while CI (no .env) is green.
+#
+#   * `regexes` — allow the OBVIOUSLY-FAKE, committed test-profile credentials in
+#                 config/environments/test.env and tests/fakes.py. These are
+#                 non-secret fixtures by design (see the header in test.env): the
+#                 raw test key, the fake HMAC pepper, and the HMAC-SHA256 hash of
+#                 the two. gitleaks does not flag them today; pinning them keeps a
+#                 future gitleaks version from failing the gate on a value that is
+#                 intentionally committed. A REAL key in those files still trips the
+#                 default rules — only these three literal strings are exempt.
+
+title = "production-llm-platform gitleaks config"
+
+[extend]
+# Start from gitleaks' full default rule set; only add allowlists on top.
+useDefault = true
+
+[allowlist]
+description = "Local-only build/tooling artifacts and obviously-fake committed test fixtures."
+
+paths = [
+  '''\.venv/''',
+  '''\.mypy_cache/''',
+  '''\.ruff_cache/''',
+  '''\.pytest_cache/''',
+  '''gl/''',
+]
+
+regexes = [
+  # Fixed, documented, non-secret test-profile credentials
+  # (config/environments/test.env, tests/fakes.py::TEST_API_KEY).
+  '''test-key-not-a-real-secret''',
+  '''test-pepper-not-a-real-secret''',
+  # HMAC-SHA256(test-pepper-not-a-real-secret, test-key-not-a-real-secret).
+  '''231965b3b3f3d6030b500d21b1984e72dbba04d4af29ceacae9bb3a1ee435034''',
+]

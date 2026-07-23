@@ -3,7 +3,7 @@
 A production-grade LLM platform, built in **10 deliberate stages** — each stage
 adding one layer of real production concern, documented as it goes.
 
-> ### 🚧 Stage 6 of 10 complete — MLOps
+> ### 🚧 Stage 8 of 10 complete — Security
 >
 > **What exists today:** a FastAPI service whose chat endpoint runs a real
 > **LangGraph agent loop against the Anthropic API** — it reasons, calls tools,
@@ -15,24 +15,38 @@ adding one layer of real production concern, documented as it goes.
 > real** ([ADR 0016](docs/adr/0016-observability-stack.md)): every `@traced` call
 > site emits an **OpenTelemetry span** and each request is a root span, exported
 > OTLP/HTTP → **OTel Collector → Grafana Tempo**, with Grafana dashboards and
-> symptom alerts provisioned as code. **The RAG pipeline now has an evaluation
+> symptom alerts provisioned as code. **The RAG pipeline has an evaluation
 > harness and a CI regression gate**
 > ([ADR 0017](docs/adr/0017-rag-evaluation-and-regression-gate.md)):
 > `scripts/evaluate.py` scores retrieval (recall@k / MRR) over a checked-in dataset
 > using deterministic offline embeddings — a hermetic, **required** CI job that
 > fails the build on a regression; an opt-in LLM-as-judge tier adds faithfulness /
-> citation scoring but never runs in CI. Plus everything from Stages 1–3: **real
+> citation scoring but never runs in CI. **The API now deploys to Kubernetes**
+> ([ADR 0018](docs/adr/0018-kubernetes-and-terraform.md)): a Helm chart
+> (`infrastructure/kubernetes/helm/`) with liveness/readiness probes wired to
+> `/health`/`/ready`, verified end-to-end on a local `kind` cluster; dev-mode
+> in-cluster datastores vs managed ones are gated by `devDependencies.enabled`.
+> AWS Terraform (`infrastructure/terraform/`) provisions VPC/EKS/RDS/ElastiCache/S3
+> — **validated, never applied**. **The chat endpoint is now authenticated**
+> ([ADR 0019](docs/adr/0019-api-authentication-rate-limiting-and-guardrails.md)):
+> a bearer **API key** (only a salted `HMAC-SHA256` is stored; missing/bad/wrong all
+> return the same `401`), a **Redis-backed per-principal rate limiter** (`429`,
+> fail-open on a Redis outage), and heuristic **input/excerpt/egress guardrails** on
+> top of the nonce fence — plus two hermetic CI gates, **gitleaks** (secret scan) and
+> **pip-audit** (dependency scan). Plus everything from Stages 1–3: **real
 > token accounting**, **conversation history in Postgres** behind a **Redis
 > read-through cache**, SSE streaming, health / readiness / version / metrics
 > endpoints, structured JSON logging, typed layered configuration, pooled datastore
 > connections, a Docker Compose stack, and a strict CI quality gate.
 >
-> **What does not exist yet:** **no authentication** — the API and the corpus are
-> both entirely unauthenticated (Stage 8). No Kubernetes/Terraform (Stage 7), no
-> load/chaos testing or SLOs (Stage 9). Metrics are **not** exported through the
-> OTel collector (traces only, [ADR 0016](docs/adr/0016-observability-stack.md)) —
-> deferred to Stage 9. Evaluation covers **RAG retrieval only**. Remaining
-> future-stage components are **interface stubs that raise `NotImplementedError`**.
+> **What does not exist yet:** authentication is **API-key only** — no JWT/OAuth/IdP,
+> no key rotation, single-tier authZ, and no per-source RAG trust tiers (all deferred
+> by decision, [ADR 0019](docs/adr/0019-api-authentication-rate-limiting-and-guardrails.md)).
+> No load/chaos testing or SLOs (Stage 9). Metrics are **not** exported through the
+> OTel collector (traces only,
+> [ADR 0016](docs/adr/0016-observability-stack.md)) — deferred to Stage 9.
+> Evaluation covers **RAG retrieval only**. Remaining future-stage components are
+> **interface stubs that raise `NotImplementedError`**.
 > See [docs/architecture.md](docs/architecture.md) for the current-vs-planned split.
 
 ---
@@ -44,7 +58,7 @@ adding one layer of real production concern, documented as it goes.
 | **Reproducible** | Exact `==` pins, committed `uv.lock`, `--frozen` installs — laptop, CI and image resolve identically. |
 | **Observable** | JSON logs with request-id correlation; Prometheus `/metrics`; `@traced` emits real **OpenTelemetry spans** → Collector → Grafana Tempo ([ADR 0016](docs/adr/0016-observability-stack.md)). |
 | **Typed & tested** | mypy `strict` and ruff from commit #1, enforced in CI. The suite is **hermetic by construction** — it cannot call a paid API ([ADR 0009](docs/adr/0009-hermetic-llm-testing.md)). |
-| **Stable seams** | Proven repeatedly, not asserted: Stage 3 replaced the mock engine with a full agent stack behind the same `CompletionEngine` protocol; Stage 4 added retrieval as one more `Tool`; Stage 5 gave `@traced` a real OTel backend without touching a call site. None changed a route or the SSE format. Later stages fill contracts (`AuthProvider`, …) rather than re-cutting the design. |
+| **Stable seams** | Proven repeatedly, not asserted: Stage 3 replaced the mock engine with a full agent stack behind the same `CompletionEngine` protocol; Stage 4 added retrieval as one more `Tool`; Stage 5 gave `@traced` a real OTel backend without touching a call site. None changed a route or the SSE format. Stage 8 then filled the `AuthProvider`/`Guardrail` contracts (auth, rate limiting, guardrails) as FastAPI dependencies around the same route — again without re-cutting it. |
 | **Secure by default** | No secrets in git, env-only credentials, non-root container, errors that never leak internals. |
 | **Honest** | Docs label planned work as planned. Stubs raise instead of faking. |
 
@@ -54,7 +68,7 @@ adding one layer of real production concern, documented as it goes.
 **Retrieval:** `llama-index-core==0.14.23` · `voyageai==0.5.0` · `qdrant-client==1.18.0`
 **Observability:** `opentelemetry-{api,sdk}==1.43.0` · OTLP/HTTP exporter · OTel Collector · Grafana Tempo
 **Data:** PostgreSQL · Redis · Qdrant (holds document vectors as of Stage 4)
-**Ops:** Docker · Docker Compose · Prometheus · Grafana · GitHub Actions
+**Ops:** Docker · Docker Compose · Prometheus · Grafana · GitHub Actions · Kubernetes · Helm · Terraform (AWS, validate-only)
 **Quality:** pytest · ruff · mypy (strict) · pre-commit · RAG eval regression gate (Stage 6)
 
 Every choice is justified in [ADR 0001](docs/adr/0001-stack-selection.md).
@@ -125,7 +139,7 @@ services/
                       document_search tool (Stage 4)
   monitoring/      ✅ tracing seam — OTLP/Local providers, OTel span export (Stage 5)
   evaluation/      ✅ RetrievalEvaluator · metrics · dataset · baseline · LLM-judge (Stage 6)
-  security/        ⬜ stub — Stage 8
+  security/        ✅ ApiKeyAuthProvider · RedisRateLimiter · input/excerpt/egress guardrails (Stage 8)
 shared/            ✅ config · logging · observability · datastores · migrations · version
 data/corpus/       ✅ the RAG corpus — ingested by scripts/ingest.py (Stage 4)
 data/eval/         ✅ eval dataset + regression baseline — scored by scripts/evaluate.py (Stage 6)
@@ -133,7 +147,7 @@ migrations/        ✅ forward-only raw SQL, applied on startup
 config/            committed non-secret env profiles (dev/test/prod)
 tests/             ✅ unit tests mirroring the source tree
 examples/          runnable examples
-infrastructure/    docker/ ✅   kubernetes/ ⬜ Stage 7   terraform/ ⬜ Stage 7
+infrastructure/    docker/ ✅   kubernetes/ ✅ Helm chart, kind-verified (Stage 7)   terraform/ ✅ AWS, validated-never-applied (Stage 7)
 scripts/           helper scripts — ingest.py (costs $ outside test) · evaluate.py (RAG eval gate)
 .github/workflows/ CI
 ```
@@ -152,10 +166,10 @@ Each stage ends with a summary document at a **fixed** filename:
 | 3 | Agents | [`stage-03-agents.md`](docs/stage-summaries/stage-03-agents.md) | [log](docs/verification-log/stage-03-agents.md) | ✅ complete |
 | 4 | RAG | [`stage-04-rag.md`](docs/stage-summaries/stage-04-rag.md) | [log](docs/verification-log/stage-04-rag.md) | ✅ complete |
 | 5 | Observability | [`stage-05-observability.md`](docs/stage-summaries/stage-05-observability.md) | — | ✅ complete |
-| 6 | MLOps | [`stage-06-mlops.md`](docs/stage-summaries/stage-06-mlops.md) | — | ✅ **current — complete** |
-| 7 | Kubernetes | `stage-07-kubernetes.md` | — | ⬜ next |
-| 8 | Security | `stage-08-security.md` | — | ⬜ planned |
-| 9 | Reliability | `stage-09-reliability.md` | — | ⬜ planned |
+| 6 | MLOps | [`stage-06-mlops.md`](docs/stage-summaries/stage-06-mlops.md) | — | ✅ complete |
+| 7 | Kubernetes | [`stage-07-kubernetes.md`](docs/stage-summaries/stage-07-kubernetes.md) | [log](docs/verification-log/stage-07-kubernetes.md) | ✅ complete |
+| 8 | Security | [`stage-08-security.md`](docs/stage-summaries/stage-08-security.md) | [log](docs/verification-log/stage-08-security.md) | ✅ **current — complete** |
+| 9 | Reliability | `stage-09-reliability.md` | — | ⬜ next |
 | 10 | Portfolio | `stage-10-portfolio.md` | — | ⬜ planned |
 
 Live progress: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)

@@ -34,6 +34,11 @@ from services.api.schemas import (
     Delta,
     Usage,
 )
+from services.api.security import (
+    AuthorizedPrincipal,
+    screen_answer_egress,
+    screen_user_input,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -103,12 +108,21 @@ def _sse(payload: str) -> str:
 )
 @traced
 async def create_chat_completion(
-    payload: ChatCompletionRequest, engine: EngineDep
+    payload: ChatCompletionRequest,
+    engine: EngineDep,
+    principal: AuthorizedPrincipal,
+    request: Request,
 ) -> ChatCompletionResponse | StreamingResponse:
-    """Create a chat completion, streamed or whole."""
+    """Create a chat completion, streamed or whole.
+
+    ``principal`` resolves the bearer auth and rate limit before this body runs
+    (Stage 8): an unauthenticated caller never reaches here. The user-input
+    guardrail screens the incoming turn before the agent loop starts.
+    """
+    screen_user_input(request, principal, payload.messages)
     if payload.stream:
         return StreamingResponse(
-            _stream_completion(payload, engine),
+            _stream_completion(payload, engine, request, principal),
             media_type="text/event-stream",
             headers={
                 # Proxies must not buffer or cache a live stream.
@@ -116,17 +130,21 @@ async def create_chat_completion(
                 "X-Accel-Buffering": "no",
             },
         )
-    return await _whole_completion(payload, engine)
+    return await _whole_completion(payload, engine, request, principal)
 
 
 async def _whole_completion(
-    payload: ChatCompletionRequest, engine: CompletionEngine
+    payload: ChatCompletionRequest,
+    engine: CompletionEngine,
+    request: Request,
+    principal: str,
 ) -> ChatCompletionResponse:
     completion = await engine.complete(
         payload.messages,
         max_tokens=payload.max_tokens,
         conversation_id=payload.conversation_id,
     )
+    screen_answer_egress(request, principal, completion.text)
     return ChatCompletionResponse(
         id=_completion_id(),
         created=int(time.time()),
@@ -143,7 +161,10 @@ async def _whole_completion(
 
 
 async def _stream_completion(
-    payload: ChatCompletionRequest, engine: CompletionEngine
+    payload: ChatCompletionRequest,
+    engine: CompletionEngine,
+    request: Request,
+    principal: str,
 ) -> AsyncIterator[str]:
     """Yield the completion as SSE frames, then the ``[DONE]`` sentinel.
 
@@ -192,5 +213,8 @@ async def _stream_completion(
     if final is None:  # pragma: no cover - the engine protocol guarantees one
         raise RuntimeError("engine stream finished without a final completion")
 
+    # Egress screen runs on the assembled answer. On this path the bytes have
+    # already streamed to the client, which is fine: the decision is log-only.
+    screen_answer_egress(request, principal, final.text)
     yield chunk(Delta(), final.finish_reason, _citations(final))
     yield _sse(_DONE)

@@ -38,7 +38,7 @@ tracing without touching any of it.
 
 ---
 
-## Current state (Stage 7 — built and verified)
+## Current state (Stage 8 — built and verified)
 
 ### Component map
 
@@ -290,11 +290,49 @@ chunk id) and surface as a **new top-level `citations` field** on the response:
 on the final SSE frame when streaming, once when whole. An ungrounded answer
 reports `"citations": []` rather than omitting the field.
 
+### Security (Stage 8, ADR 0019)
+
+Stage 8 closes the "unauthenticated API" gap, deliberately scoped to what this
+project is — one data-bearing endpoint, no cloud IAM, no identity provider —
+rather than enterprise security. It lives in `services/security/` (`auth.py`,
+`rate_limit.py`, `guardrails.py`) with the API wiring in `services/api/security.py`
+and the answer-egress check in `services/retrieval/egress.py`.
+
+**What is authenticated, and what deliberately is not.** Only
+`POST /v1/chat/completions` requires a credential — `Authorization: Bearer <key>`.
+`/health`, `/ready`, `/version` and `/metrics` stay open on purpose: kubelet's
+probes (ADR 0018's Helm chart) and Prometheus's scrape carry no credential, and
+gating them would break the probe and scrape paths. This boundary is stated so no
+middleware wiring gates them by accident.
+
+| Concern | Mechanism | Failure mode |
+|---------|-----------|--------------|
+| AuthN | Static API key, bearer-style. Store holds `principal → HMAC-SHA256(pepper, key)`; presented key hashed the same way, `hmac.compare_digest` against every stored hash (constant-time, no membership timing leak). Raw key never logged or committed. | Missing / malformed / wrong key → the **same** `401` in the uniform envelope; only the log distinguishes why. |
+| AuthZ | Single-tier — a valid key is a valid principal with full chat access. No role/scope split (one endpoint family). | n/a |
+| Rate limit | Redis-backed, per-principal, **atomic** (Lua `INCR` + first-hit `EXPIRE`) so replicas cannot race a read-then-write. Threshold/window are `Settings`. | Over limit → `429`, uniform envelope. Redis down → **fail-open**, logs `ratelimit.degraded` every time (ADR 0008 precedent). |
+| Input guardrail | Screens the user's turn before the agent loop. | **Blocks (`400`)** direct instruction-override / system-prompt-extraction; **logs only** persona jailbreaks and PII (false-positive risk). |
+| Excerpt guardrail | Heuristic screen over retrieved excerpts. | **Log-only, never drops** — the ADR 0014 nonce fence stays the load-bearing mitigation; this is defense-in-depth telemetry. |
+| Answer egress | Checks the final answer for leaked fence markers / echoed preamble. | **Log-only** — a signal that something unexpected happened, never a rewrite. |
+
+Auth, rate limiting and guardrails are all **local logic with no paid external
+hop**, so unlike the LLM/embeddings clients they need no hermetic seam — the `test`
+profile constructs and exercises them for real against a fixed, obviously-fake key.
+Under `prod` the settings validator now also refuses to boot without `API_KEYS` +
+`API_KEY_HASH_SECRET`, exactly as it does for the datastore URLs and provider keys.
+
+**Secret management is CI-scanning only** (no runtime secrets backend): two new
+hermetic CI gates — **gitleaks** (pinned) over the tree against a `.gitleaks.toml`
+that allowlists only the documented fake test fixtures, and **pip-audit** (pinned)
+over the exported `uv.lock`. Both are free, key-free, and fail the build on a
+finding. Per-source trust tiering and a cloud secrets backend are explicitly
+deferred (ADR 0019), tied to a corpus-admission or cloud-account change that has
+not happened.
+
 ### `shared/` foundation
 
 | Module | Responsibility |
 |--------|----------------|
-| `config.py` | Typed `Settings` (pydantic-settings), layered profiles — see ADR 0003. `prod` refuses to boot without all three datastore URLs, `ANTHROPIC_API_KEY`, *and* `VOYAGE_API_KEY` |
+| `config.py` | Typed `Settings` (pydantic-settings), layered profiles — see ADR 0003. `prod` refuses to boot without all three datastore URLs, `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, *and* the API-key auth material (`API_KEYS` + `API_KEY_HASH_SECRET`, ADR 0019) |
 | `logging.py` | JSON formatter (`timestamp`, `level`, `service`, `environment`, `request_id`, `logger`, `message`, `exception`) + console formatter; routes uvicorn logs through one handler |
 | `observability.py` | `@traced` — a structured DEBUG log **and** a real OpenTelemetry span (Stage 5) on enter/exit/duration/error; sync + async; PEP 695 typed. Imports the OTel **API** only, never the SDK, so `shared/` still never imports `services/` (ADR 0016) |
 | `datastores.py` | `Datastore` ABC + Postgres/Redis/Qdrant implementations and `DatastoreRegistry` — see ADR 0005 |
@@ -526,12 +564,14 @@ builds it.
 
 | Component | Stage | Status today |
 |-----------|-------|--------------|
-| `services/security` — `AuthProvider`, `Guardrail` | 8 | **Not implemented.** API is entirely unauthenticated. |
 | Reliability — load testing, chaos, SLOs, pool tuning, reconnect/circuit breaking, **OTel metrics export** | 9 | **Nothing exists.** |
 
-### Deliberate non-goals as of Stage 6
+### Deliberate non-goals as of Stage 8
 
-**No authentication** (the corpus and the API are both unauthenticated — Stage 8).
+**Authentication is now API-key only** (Stage 8, ADR 0019): no JWT, no OAuth, no
+external IdP, no key rotation/expiry beyond editing `API_KEYS` and restarting, and
+single-tier authZ (no admin/ops split). The heuristic guardrails are evadable
+signal, not a boundary, and the rate limiter fails open on a Redis outage.
 **Metrics are not exported through the OTel collector** — the
 collector carries traces only, and metrics stay on Prometheus scraping `/metrics`
 (a deliberate scope cut, ADR 0016), so Grafana's service-map and node-graph views
@@ -545,8 +585,10 @@ Retrieval itself is deliberately minimal: no reranking, no hybrid (keyword +
 vector) search, no query expansion, and no automatic re-ingestion — ingestion is
 an explicit operator action. Editing a document that becomes shorter leaves its
 old tail chunks in Qdrant, since ingestion is upsert-only (ADR 0012). The
-prompt-injection mitigation is delimiting and labelling, **not** full hardening:
-no classifier, no trust tiers, no answer egress filtering (ADR 0014, Stage 8).
+prompt-injection mitigation stays delimiting and labelling as the load-bearing
+control (ADR 0014); Stage 8 adds heuristic excerpt screening and a log-only answer
+egress check on top (ADR 0019), but still **no classifier and no per-source trust
+tiers** — those wait on a corpus-admission change that has not happened.
 
 Within the agent stack, the Stage 3 omissions still stand: no prompt caching, no
 context compaction, no per-conversation concurrency control, and no retry or
@@ -572,7 +614,8 @@ its promise** and swapped Qdrant's HTTP probe for `qdrant-client` behind the
 unchanged contract. Later stages fill seams; they do not re-cut them.
 
 **Fail loud.** Invalid config fails at startup — `prod` will not boot without its
-datastore URLs, its `ANTHROPIC_API_KEY`, *or its `VOYAGE_API_KEY`*. Unbuilt
+datastore URLs, its `ANTHROPIC_API_KEY`, its `VOYAGE_API_KEY`, *or its API-key auth
+material* (`API_KEYS` + `API_KEY_HASH_SECRET`, ADR 0019). Unbuilt
 components raise `NotImplementedError`. Errors are surfaced and logged with
 traces, never swallowed. The deliberate exceptions are places where degrading
 beats failing: a datastore down at boot yields an un-ready pod rather than a
@@ -593,8 +636,11 @@ from env only, container runs as non-root, internal error text never reaches
 clients. The calculator tool parses to an AST and walks an allow-list rather than
 calling `eval`; the retrieval tool fences untrusted document text behind a
 per-call nonce (ADR 0014): the model is not a trusted caller, and neither is
-whatever talked to it or whatever it retrieved. **The API is still entirely
-unauthenticated** — that is Stage 8.
+whatever talked to it or whatever it retrieved. **Stage 8 authenticates the chat
+endpoint** (bearer API key, salted-hash store), rate-limits it per principal, and
+adds heuristic input/excerpt/egress guardrails on top of the nonce fence — plus two
+hermetic CI gates (gitleaks, pip-audit) that fail the build on a committed secret
+or a vulnerable dependency (ADR 0019).
 
 ## See also
 
@@ -615,4 +661,6 @@ unauthenticated** — that is Stage 8.
 - [ADR 0015 — Opt-in live provider contract test](adr/0015-live-provider-contract-test.md)
 - [ADR 0016 — Observability stack: OTel traces → Collector → Tempo, Grafana-native alerting](adr/0016-observability-stack.md)
 - [ADR 0017 — RAG evaluation, recall@k/MRR, and the regression gate](adr/0017-rag-evaluation-and-regression-gate.md)
+- [ADR 0018 — Kubernetes via Helm, dev-vs-managed datastores, validate-not-apply Terraform](adr/0018-kubernetes-and-terraform.md)
+- [ADR 0019 — API-key auth, rate limiting, RAG guardrails, CI secret scanning](adr/0019-api-authentication-rate-limiting-and-guardrails.md)
 - [PROJECT_STATUS.md](PROJECT_STATUS.md) — roadmap and progress

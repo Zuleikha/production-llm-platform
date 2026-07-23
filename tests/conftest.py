@@ -18,6 +18,8 @@ from fastapi.testclient import TestClient
 from services.api.app import create_app
 from shared.config import Settings, get_settings
 
+from tests.fakes import AUTH_HEADERS
+
 
 @pytest.fixture
 def settings() -> Settings:
@@ -32,7 +34,11 @@ def client(settings: Settings) -> Iterator[TestClient]:
 
     ``raise_server_exceptions=False`` so tests can assert on the 500 envelope
     produced by the global error handler instead of the exception propagating.
+
+    Carries the Stage 8 bearer credential by default (``AUTH_HEADERS``), so tests
+    that exercise the now-authenticated chat endpoint do not each have to attach
+    it. Tests about auth *failure* override or drop the header per request.
     """
     app = create_app(settings)
-    with TestClient(app, raise_server_exceptions=False) as test_client:
+    with TestClient(app, headers=AUTH_HEADERS, raise_server_exceptions=False) as test_client:
         yield test_client

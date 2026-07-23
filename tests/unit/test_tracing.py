@@ -155,6 +155,8 @@ class TestBuildTracerProviderSelection:
             qdrant_url="http://qdrant:6333",
             anthropic_api_key="sk-ant-not-real",
             voyage_api_key="pa-not-real",
+            api_keys="principal:not-a-real-hash",
+            api_key_hash_secret="not-a-real-pepper",
         )
         provider = build_tracer_provider(settings)
         try:
@@ -187,6 +189,8 @@ class TestBuildTracerProviderSelection:
             qdrant_url="http://qdrant:6333",
             anthropic_api_key="sk-ant-not-real",
             voyage_api_key="pa-not-real",
+            api_keys="principal:not-a-real-hash",
+            api_key_hash_secret="not-a-real-pepper",
         )
         assert settings.otel_exporter_otlp_endpoint is None
         assert isinstance(build_tracer_provider(settings), LocalTracerProvider)

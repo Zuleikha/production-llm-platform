@@ -127,6 +127,29 @@ class Settings(BaseSettings):
     chunk_overlap_tokens: int = Field(default=64, ge=0)
     retrieval_top_k: int = Field(default=4, ge=1)
 
+    # --- Security (Stage 8, ADR 0019) ---
+    # API-key authentication. Only a salted hash of each key is ever stored, never
+    # the raw value. `api_keys` is a comma-separated list of `principal:hexhash`
+    # pairs; `api_key_hash_secret` is the server-side pepper HMAC'd into each key
+    # (see services/security/auth.py). Both come from the OS environment only and
+    # are mandatory under `prod` (the validator below refuses to boot without
+    # them, exactly as it does for the datastore URLs and provider keys). No
+    # hermetic seam is needed — auth is local logic with no paid external hop, so
+    # `test` constructs the provider for real (a fixed, obviously-fake test key
+    # lives in config/environments/test.env).
+    api_keys: str | None = None
+    api_key_hash_secret: str | None = None
+    # Redis-backed per-principal rate limit: at most `rate_limit_requests` per
+    # `rate_limit_window_seconds` window, keyed by authenticated principal id.
+    rate_limit_requests: int = Field(default=60, ge=1)
+    rate_limit_window_seconds: int = Field(default=60, gt=0)
+    # Guardrail toggles — all on by default. Local logic (no external hop), so the
+    # `test` profile runs them for real. See services/security/guardrails.py and
+    # services/retrieval/egress.py.
+    input_guardrail_enabled: bool = True
+    retrieval_guardrail_enabled: bool = True
+    egress_guardrail_enabled: bool = True
+
     @model_validator(mode="after")
     def _chunk_overlap_must_fit_in_chunk(self) -> Settings:
         """Reject an overlap that is not smaller than the chunk itself.
@@ -168,8 +191,11 @@ class Settings(BaseSettings):
         say so is at boot, naming the variable. Stage 4 extends it again to
         ``VOYAGE_API_KEY``: without it every retrieval query 401s, and the agent
         degrades to answering ungrounded — which is worse than failing, because
-        it looks like it worked. Dev and test are exempt — the test profile
-        deliberately sets none of them.
+        it looks like it worked. Stage 8 extends it to the API-key material
+        (``API_KEYS`` + ``API_KEY_HASH_SECRET``): a prod service with no key store
+        would reject every authenticated request, and the honest place to say so
+        is at boot, naming the variables (ADR 0019). Dev and test are exempt — the
+        test profile deliberately sets none of them (bar its own fake test key).
         """
         if not self.is_production:
             return self
@@ -179,6 +205,8 @@ class Settings(BaseSettings):
             "qdrant_url",
             "anthropic_api_key",
             "voyage_api_key",
+            "api_keys",
+            "api_key_hash_secret",
         )
         missing = [name for name in required if not getattr(self, name)]
         if missing:

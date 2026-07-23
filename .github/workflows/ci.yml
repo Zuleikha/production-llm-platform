@@ -95,6 +95,63 @@ jobs:
           ENVIRONMENT: test
         run: uv run python scripts/evaluate.py
 
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+
+    # Hermetic secret-scanning gate (Stage 8, ADR 0019). Scans the checked-out
+    # tree with the pinned gitleaks binary and the repo's .gitleaks.toml allowlist
+    # (which exempts ONLY the obviously-fake, documented test-profile fixtures — a
+    # real key in those files still trips the default rules). A clean runner has no
+    # .venv/.env/gl, so this scans the committed surface. Fails the build on any
+    # finding. No network calls to any project service, no secrets, no cost.
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pinned gitleaks
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks version
+
+      - name: Scan for committed secrets
+        # --redact: never echo a matched secret into the public CI log.
+        # --exit-code 1: non-zero (and so a failed build) on any finding.
+        run: /tmp/gitleaks dir . --config .gitleaks.toml --redact --no-banner --exit-code 1
+
+  dependency-scan:
+    name: Dependency vulnerability scan (pip-audit)
+    runs-on: ubuntu-latest
+
+    # Hermetic dependency-vulnerability gate (Stage 8, ADR 0019). Exports the
+    # committed uv.lock to a fully-pinned requirements file and audits it against
+    # the Python advisory database with a pinned pip-audit. Fails on any known
+    # vulnerability; a real finding must be fixed or explicitly justified, never
+    # silently suppressed. Queries the public advisory API only — no project
+    # secrets, no paid API, no cost.
+    env:
+      PIP_AUDIT_VERSION: "2.9.0"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-suffix: ${{ github.job }}
+
+      # --frozen: audit exactly what is locked, never a re-resolution.
+      - name: Export locked dependencies
+        run: uv export --frozen --no-emit-project --format requirements-txt > requirements-audit.txt
+
+      - name: Audit locked dependencies
+        run: uvx --from pip-audit==${{ env.PIP_AUDIT_VERSION }} pip-audit -r requirements-audit.txt
+
   docker:
     name: Docker build + health verification
     runs-on: ubuntu-latest
@@ -171,6 +228,11 @@ jobs:
       # — so placeholders satisfy the boot check without CI ever needing a real key
       # or spending a cent. If a step is ever added that makes a provider call,
       # these values must not be what backs it.
+      #
+      # Stage 8 (ADR 0019): the prod validator now also refuses to boot without
+      # API_KEYS + API_KEY_HASH_SECRET. We pass the same obviously-fake, documented
+      # test fixtures (allowlisted in .gitleaks.toml) so the prod container boots
+      # AND the authenticated-chat assertion below can present a valid bearer key.
       - name: Run container
         run: |
           docker run -d --name api-ci --network host \
@@ -180,6 +242,8 @@ jobs:
             -e QDRANT_URL=http://localhost:6333 \
             -e ANTHROPIC_API_KEY=sk-ant-ci-not-a-real-key \
             -e VOYAGE_API_KEY=pa-ci-not-a-real-key \
+            -e API_KEYS=test-principal:231965b3b3f3d6030b500d21b1984e72dbba04d4af29ceacae9bb3a1ee435034 \
+            -e API_KEY_HASH_SECRET=test-pepper-not-a-real-secret \
             production-llm-platform/api:ci
 
       - name: Wait for /health to return 200
@@ -245,27 +309,62 @@ jobs:
           docker logs api-ci-test
           exit 1
 
-      - name: Verify chat completion and SSE streaming
+      # Stage 8 (ADR 0019): chat now requires a bearer key. The test-profile image
+      # bakes config/environments/test.env, whose obviously-fake principal/key is
+      # `test-key-not-a-real-secret`. No REDIS_URL is set on this container, so the
+      # rate limiter fails open (ADR 0008/0019) and these functional calls are not
+      # counted — the 429 path is proven by the hermetic unit tests in the
+      # `quality` job and the local container-boot check in the stage summary.
+      - name: Verify auth rejects a missing/invalid key (401, uniform envelope)
+        run: |
+          set -euo pipefail
+          # No Authorization header, and a wrong key, must BOTH be the same 401
+          # shape and must not reveal why (ADR 0019).
+          nokey=$(curl -s -o - -w '\n%{http_code}' http://localhost:8001/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -d '{"messages":[{"role":"user","content":"ping"}]}' | tee /dev/stderr)
+          echo "$nokey" | tail -1 | grep -qx '401'
+          echo "$nokey" | grep -q '"error"'
+          badkey=$(curl -s -o - -w '\n%{http_code}' http://localhost:8001/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -H 'Authorization: Bearer wrong-key' \
+            -d '{"messages":[{"role":"user","content":"ping"}]}' | tee /dev/stderr)
+          echo "$badkey" | tail -1 | grep -qx '401'
+
+      - name: Verify chat completion and SSE streaming (authenticated)
         run: |
           set -euo pipefail
           curl -fsS http://localhost:8001/v1/chat/completions \
             -H 'Content-Type: application/json' \
+            -H 'Authorization: Bearer test-key-not-a-real-secret' \
             -d '{"messages":[{"role":"user","content":"ping"}]}' \
             | tee /dev/stderr | grep -q '"object":"chat.completion"'
           stream=$(curl -fsS -N http://localhost:8001/v1/chat/completions \
             -H 'Content-Type: application/json' \
+            -H 'Authorization: Bearer test-key-not-a-real-secret' \
             -d '{"messages":[{"role":"user","content":"ping"}],"stream":true}' | tee /dev/stderr)
           echo "$stream" | grep -q '"object":"chat.completion.chunk"'
           echo "$stream" | grep -q 'data: \[DONE\]'
 
-      # The prod container must REFUSE chat rather than pretend: its key is a
-      # dummy, so a real call 401s. Assert it fails in the uniform error envelope
-      # and does not leak internals — the thing that would actually be a defect.
-      - name: Verify prod-profile chat fails cleanly with a bad key
+      # The prod container must REFUSE chat rather than pretend. Two distinct
+      # refusals now, and both must land in the uniform error envelope without
+      # leaking internals (the thing that would actually be a defect):
+      #   1. No bearer key  -> 401 at the auth layer (Stage 8, ADR 0019).
+      #   2. Valid bearer key but the baked ANTHROPIC key is a dummy, so the real
+      #      model call fails -> 5xx. This exercises the prod error path past auth.
+      - name: Verify prod-profile chat fails cleanly (401 no key, 5xx past auth)
         run: |
           set -euo pipefail
+          # 1. Missing credential -> 401, uniform envelope, nothing leaked.
+          noauth=$(curl -s -o - -w '\n%{http_code}' http://localhost:8000/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -d '{"messages":[{"role":"user","content":"ping"}]}' | tee /dev/stderr)
+          echo "$noauth" | tail -1 | grep -qx '401'
+          echo "$noauth" | grep -q '"error"'
+          # 2. Valid key passes auth; the dummy Anthropic key then 5xx's cleanly.
           body=$(curl -s -o - -w '\n%{http_code}' http://localhost:8000/v1/chat/completions \
             -H 'Content-Type: application/json' \
+            -H 'Authorization: Bearer test-key-not-a-real-secret' \
             -d '{"messages":[{"role":"user","content":"ping"}]}' | tee /dev/stderr)
           echo "$body" | tail -1 | grep -qE '^5[0-9][0-9]$'
           echo "$body" | grep -q '"error"'
@@ -374,12 +473,18 @@ jobs:
         run: kind load docker-image production-llm-platform/api:ci --name pllm-ci
 
       - name: helm install (dev datastores)
+        # Stage 8 (ADR 0019): the prod profile now also refuses to boot without
+        # API_KEYS + API_KEY_HASH_SECRET, so the chart must supply them or the pod
+        # crash-loops and /ready never comes up. Obviously-fake CI fixtures, same
+        # as the other placeholder keys above (allowlisted in .gitleaks.toml).
         run: |
           helm install ci-api "$CHART_DIR" \
             --set image.tag=ci \
             --set devDependencies.enabled=true \
             --set secrets.anthropicApiKey=ci-not-a-real-key \
-            --set secrets.voyageApiKey=ci-not-a-real-key
+            --set secrets.voyageApiKey=ci-not-a-real-key \
+            --set secrets.apiKeys=test-principal:231965b3b3f3d6030b500d21b1984e72dbba04d4af29ceacae9bb3a1ee435034 \
+            --set secrets.apiKeyHashSecret=test-pepper-not-a-real-secret
 
       - name: Wait for rollouts
         run: |
