@@ -71,6 +71,7 @@ docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.
   runs them for real). One `401` shape for missing/bad/wrong (log says why, never the key); store =
   `principal:HMAC-SHA256(pepper,key)`. Rate limit Redis-atomic, **fail-open + log** (ADR 0008).
   Guardrails **log events, never the text**; block only direct override/probe on user input (400).
+  gitleaks allowlist keys off the **fake-credential convention** (`not-a-real`/`wrong-key`/`test-raw-key-`), not paths — a real key still trips.
 - **Persistence:** Postgres is source of truth, Redis only caches. Writes **invalidate**
   (Postgres first, then `DELETE`) — never rewrite. A Redis failure degrades to a Postgres
   read: the **one** sanctioned exception to fail-loud (ADR 0008). Migrations are plain SQL,
@@ -106,7 +107,7 @@ uv sync                                        # install  (real calls need OS-en
 uv run uvicorn services.api.app:app --reload   # API only  -> :8000
 docker compose up -d --build                   # full stack  ·  scripts/ingest.py  # ingest corpus -> Qdrant (costs $ outside test)
 uv run python scripts/evaluate.py              # Tier 1 RAG eval + CI regression gate (hermetic)
-pwsh scripts/verify.ps1   # or ./scripts/verify.sh — the whole gate (ruff · format · mypy · pytest)
+pwsh scripts/verify.ps1   # or ./scripts/verify.sh — the whole gate (ruff · format · mypy · pytest · gitleaks · pip-audit)
 ```
 
 Endpoints: `/health` `/ready` `/version` `/metrics` `/docs` · `POST /v1/chat/completions` (`Authorization:
