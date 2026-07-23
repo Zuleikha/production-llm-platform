@@ -41,10 +41,12 @@ docs/interview-prep.md
 # Local gitleaks binary download (Stage 8 secret scanning) — this-machine tool,
 # not a deliverable; CI installs gitleaks itself. Never commit the 30MB binary.
 gl/
-# gitleaks scan output — a local `gitleaks dir .` writes findings (redacted secrets)
-# to this file; it's a scan artefact, never a deliverable, and must never be committed.
+# gitleaks scan output — a local `gitleaks dir . --report-path <name>` writes findings
+# (redacted secrets) to a JSON file; it's a scan artefact, never a deliverable, and must
+# never be committed. Glob covers every report name we use (gitleaks-report.json,
+# gitleaks-ci-report.json, etc.).
 gitleaks-report.json
-*-gitleaks-report.json
+*gitleaks*report*.json
 
 # --- OS ---
 .DS_Store
