@@ -19,11 +19,14 @@ datasources:
         tags:
           - key: service.name
             value: service
-      # No serviceMap / nodeGraph. Both are driven by the collector's
-      # spanmetrics + servicegraph connectors remote-writing to Prometheus —
-      # i.e. the second metrics pipeline ADR 0016 deliberately did not build.
-      # Enabling them while nothing produces those series would provision a
-      # panel that renders "No data" forever and reads as a broken stack rather
-      # than a deliberate scope cut. The RED panels read the API's own /metrics.
+      # Service map + node graph, enabled Stage 9 (ADR 0020) now that real series
+      # back them: the collector's spanmetrics/servicegraph connectors export to
+      # Prometheus (otel-collector/config.yml), which Prometheus scrapes on :8889.
+      # `serviceMap.datasourceUid` points Tempo at those series so the map has
+      # request/error/duration edges; `nodeGraph` turns on the node-graph view of
+      # a trace. Kept disabled through Stage 8 while nothing produced the series
+      # (a panel rendering "No data" reads as a broken stack, not a scope cut).
+      serviceMap:
+        datasourceUid: prometheus
       nodeGraph:
-        enabled: false
+        enabled: true

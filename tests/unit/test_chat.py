@@ -212,6 +212,85 @@ def test_usage_sums_every_model_call_in_a_tool_using_run(settings: Any) -> None:
     assert usage == {"prompt_tokens": 300, "completion_tokens": 30, "total_tokens": 330}
 
 
+def test_open_circuit_breaker_returns_503_provider_unavailable(settings: Any) -> None:
+    """An open breaker renders as a distinct 503, not a 500 or a 401/429 (ADR 0020)."""
+    import httpx
+    from anthropic import APIConnectionError
+    from services.orchestrator.llm import (
+        PROVIDER_DOWN_ERRORS,
+        CircuitBreakingLLMClient,
+    )
+    from shared.resilience import CircuitBreaker
+
+    breaker = CircuitBreaker(
+        name="anthropic_llm",
+        failure_threshold=1,
+        cooldown_seconds=999,
+        trip_on=PROVIDER_DOWN_ERRORS,
+    )
+    breaker.record_failure(APIConnectionError(message="down", request=httpx.Request("POST", "/")))
+    # Breaker is now open; the wrapped (scripted) client is never reached.
+    llm = CircuitBreakingLLMClient(ScriptedLLMClient([_ONE_TURN]), breaker)
+    engine = OrchestratorEngine(AgentOrchestrator(AgentGraph(llm), NullConversationStore()))
+    client = TestClient(
+        create_app(settings, engine=engine), headers=AUTH_HEADERS, raise_server_exceptions=False
+    )
+
+    resp = client.post(_ENDPOINT, json={"messages": _messages()})
+
+    assert resp.status_code == 503
+    assert resp.json()["error"]["type"] == "provider_unavailable"
+
+
+def test_non_qualifying_provider_exception_renders_uniform_500_envelope(settings: Any) -> None:
+    """A real anthropic.* error NOT in PROVIDER_DOWN_ERRORS (e.g. AuthenticationError)
+    must render the uniform 500 envelope with NO traceback in the body — even under
+    the debug profile.
+
+    Regression guard (ADR 0020 addendum): `debug=settings.debug` wired into FastAPI
+    made Starlette's ServerErrorMiddleware return a raw traceback and bypass the
+    catch-all Exception handler when DEBUG=true (the dev profile), leaking internals.
+    `debug=True` below is the trigger; the assertion is that the standard envelope
+    still wins and the full trace stays server-side only.
+    """
+    import httpx
+    from anthropic import AuthenticationError
+    from services.orchestrator.llm import PROVIDER_DOWN_ERRORS, build_resilient_llm_client
+
+    from tests.fakes import FaultInjectingLLMClient
+
+    auth_error = AuthenticationError(
+        "invalid x-api-key",
+        response=httpx.Response(401, request=httpx.Request("POST", "/")),
+        body=None,
+    )
+    # Sanity: the breaker must NOT treat this as "provider down" — it passes through.
+    assert not isinstance(auth_error, PROVIDER_DOWN_ERRORS)
+
+    llm = build_resilient_llm_client(
+        settings, FaultInjectingLLMClient(fail_times=1, error=auth_error)
+    )
+    engine = OrchestratorEngine(AgentOrchestrator(AgentGraph(llm), NullConversationStore()))
+    # debug=True is the regression trigger — a reverted `debug=settings.debug` would
+    # leak a traceback here and fail the assertions below.
+    dbg_settings = settings.model_copy(update={"debug": True})
+    client = TestClient(
+        create_app(dbg_settings, engine=engine), headers=AUTH_HEADERS, raise_server_exceptions=False
+    )
+
+    resp = client.post(_ENDPOINT, json={"messages": _messages()})
+
+    assert resp.status_code == 500
+    # No internals in the response body: not the traceback, not the exception type.
+    assert "Traceback" not in resp.text
+    assert "AuthenticationError" not in resp.text
+    assert resp.json()["error"] == {
+        "type": "internal_error",
+        "message": "An internal server error occurred.",
+        "request_id": resp.json()["error"]["request_id"],
+    }
+
+
 @pytest.mark.parametrize(
     "payload",
     [

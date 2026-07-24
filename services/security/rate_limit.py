@@ -30,6 +30,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 from shared.logging import get_logger
+from shared.metrics import RATE_LIMITER_FAIL_OPEN
 from shared.observability import traced
 
 if TYPE_CHECKING:
@@ -97,6 +98,9 @@ class RedisRateLimiter:
         """
         client = self._source.redis_client
         if client is None:
+            # Fail-open (ADR 0008/0019). Counter drives the Stage 9 fail-open
+            # alert (ADR 0020) — the event is now visible, not just logged.
+            RATE_LIMITER_FAIL_OPEN.inc()
             _logger.warning("ratelimit.degraded", extra={"reason": "redis_unavailable"})
             return True
         key = f"{self._key_prefix}:{principal_id}"
@@ -104,7 +108,9 @@ class RedisRateLimiter:
             count = int(await client.eval(_INCR_AND_EXPIRE, 1, key, self._window))
         except Exception as exc:
             # Fail-open (ADR 0008/0019): a limiter outage must not become an
-            # endpoint outage. The event is logged every time, never swallowed.
+            # endpoint outage. The event is logged and counted every time, never
+            # swallowed. The counter backs the Stage 9 fail-open alert (ADR 0020).
+            RATE_LIMITER_FAIL_OPEN.inc()
             _logger.warning("ratelimit.degraded", extra={"reason": "redis_error"}, exc_info=exc)
             return True
         allowed = count <= self._limit

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 from shared.logging import get_logger, get_request_id
+from shared.resilience import CircuitBreakerOpenError
 
 # Register against Starlette's HTTPException, not FastAPI's subclass: the router
 # raises the Starlette base for unmatched routes (404), and registering the
@@ -69,6 +70,20 @@ async def validation_exception_handler(_request: Request, exc: Exception) -> JSO
     return _render(422, "validation_error", str(exc.errors()))
 
 
+async def circuit_breaker_open_handler(_request: Request, exc: Exception) -> JSONResponse:
+    """Render an open circuit breaker as ``503 provider_unavailable`` (ADR 0020).
+
+    A distinct type from the auth ``401`` / rate-limit ``429`` shapes, so a client
+    can tell "the model provider is temporarily down, retry shortly" apart from
+    "your request was wrong". The exception carries only the breaker name (no call
+    data), so the log is clean. Fails fast — this is the breaker refusing to wait
+    out the SDK's own timeout, not a hang.
+    """
+    name = exc.name if isinstance(exc, CircuitBreakerOpenError) else "unknown"
+    _logger.warning("circuit_breaker.rejected", extra={"breaker": name})
+    return _render(503, "provider_unavailable", "The model provider is temporarily unavailable.")
+
+
 async def unhandled_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
     """Catch-all: log the full trace, return a generic 500 (no internals leaked)."""
     _logger.error("unhandled.exception", exc_info=exc)
@@ -79,4 +94,6 @@ def register_exception_handlers(app: FastAPI) -> None:
     """Attach all error handlers to ``app``."""
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(HTTPException, http_exception_handler)
+    # Before the catch-all: an open breaker is a known 503, not an internal 500.
+    app.add_exception_handler(CircuitBreakerOpenError, circuit_breaker_open_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)

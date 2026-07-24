@@ -21,14 +21,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
-from anthropic import AsyncAnthropic
+from anthropic import APIConnectionError, AsyncAnthropic, InternalServerError
 from shared.logging import get_logger
 from shared.observability import traced
+from shared.resilience import CircuitBreaker
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
     from shared.config import Settings
+
+# The Anthropic failures that mean "the provider is down", not "the caller sent a
+# bad request". Verified against the pinned anthropic SDK (0.116.0): APITimeoutError
+# subclasses APIConnectionError (transport), and InternalServerError is the 5xx
+# APIStatusError. A 400 (BadRequestError — e.g. the "no sampling params" rejection,
+# ADR 0006) is deliberately absent: it is a caller bug and must not open the
+# breaker. See ADR 0020.
+PROVIDER_DOWN_ERRORS: tuple[type[Exception], ...] = (APIConnectionError, InternalServerError)
 
 _logger = get_logger("orchestrator.llm")
 
@@ -167,13 +176,27 @@ class AnthropicClient:
         Those parameters were removed on this model family and are rejected with
         a 400 — the request schema still accepts a ``temperature``, but it stops
         at the HTTP boundary. See ADR 0006.
+
+        **Prompt caching (Stage 9, ADR 0020).** The system prompt and the tool
+        specifications are static within a run and usually across the turns of one
+        conversation, so both carry a ``cache_control`` breakpoint. The conversion
+        is contained entirely here: the ``LLMClient`` wire shape is still
+        ``system: str`` / ``tools: Sequence[dict]``; ``_with_cache_control`` turns
+        the plain system string into Anthropic's content-block form and marks the
+        last tool spec, immediately before the SDK call. Verified against the
+        pinned SDK (anthropic 0.116.0): ``cache_control`` is a GA first-class field
+        on ``TextBlockParam``/``ToolParam`` (``{"type": "ephemeral"}``), needing no
+        beta header. A hermetic test can only assert this request *shape*; a real
+        cache hit (``cache_read_input_tokens`` > 0) is confirmable only against the
+        live API — folded into the opt-in contract test (ADR 0015).
         """
+        cached_system, cached_tools = _with_cache_control(system, tools)
         async with self._client.messages.stream(
             model=self._model,
             max_tokens=max_tokens,
-            system=system,
+            system=cached_system,  # type: ignore[arg-type]
             messages=list(messages),  # type: ignore[arg-type]
-            tools=list(tools),  # type: ignore[arg-type]
+            tools=cached_tools,  # type: ignore[arg-type]
         ) as stream:
             async for event in stream:
                 if event.type == "content_block_delta" and event.delta.type == "text_delta":
@@ -287,6 +310,95 @@ class ScriptedLLMClient:
             # deltas reproduces `turn.text` exactly.
             yield TextDelta(word if index == 0 else f" {word}")
         yield TurnCompleted(turn)
+
+
+_CACHE_CONTROL: dict[str, Any] = {"type": "ephemeral"}
+
+
+def _with_cache_control(
+    system: str, tools: Sequence[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Mark the system prompt and the last tool spec as cacheable (ADR 0020).
+
+    Returns the system as a one-block content list with a ``cache_control``
+    breakpoint, and the tools with the *last* spec marked. One breakpoint on the
+    final tool caches the whole tool array up to that point — the specs are a
+    single static prefix — so there is no need to mark every tool. Pure and
+    side-effect free: it copies rather than mutating the caller's dicts, since the
+    tool specifications are shared, long-lived registry objects.
+    """
+    cached_system = [{"type": "text", "text": system, "cache_control": _CACHE_CONTROL}]
+    tool_list = list(tools)
+    if tool_list:
+        tool_list = [*tool_list[:-1], {**tool_list[-1], "cache_control": _CACHE_CONTROL}]
+    return cached_system, tool_list
+
+
+class CircuitBreakingLLMClient:
+    """Wraps an :class:`LLMClient` in a :class:`~shared.resilience.CircuitBreaker`.
+
+    Implements the same protocol, so :class:`~services.orchestrator.graph.AgentGraph`
+    takes it as a drop-in for the real client. When the breaker is open the
+    ``stream`` raises :class:`~shared.resilience.CircuitBreakerOpenError` before the
+    wrapped client is touched — the API renders that as ``503 provider_unavailable``
+    (ADR 0020) rather than letting every request wait out the SDK's own timeout.
+
+    A stream that raises a qualifying provider error (transport/5xx) records a
+    failure; a clean drain records a success. A non-qualifying error (a 400) is
+    re-raised without counting — the breaker only trips on the provider being down.
+    """
+
+    def __init__(self, inner: LLMClient, breaker: CircuitBreaker) -> None:
+        self._inner = inner
+        self._breaker = breaker
+
+    async def stream(
+        self,
+        *,
+        system: str,
+        messages: Sequence[dict[str, Any]],
+        tools: Sequence[dict[str, Any]],
+        max_tokens: int,
+    ) -> AsyncIterator[LLMEvent]:
+        """Gate the call on the breaker, then delegate — recording the outcome.
+
+        Not decorated with ``@traced``: async generators are exempt (CLAUDE.md).
+        The breaker's own ``before_call``/``record_*`` methods carry the spans.
+        """
+        self._breaker.before_call()
+        try:
+            async for event in self._inner.stream(
+                system=system, messages=messages, tools=tools, max_tokens=max_tokens
+            ):
+                yield event
+        except GeneratorExit:
+            # The consumer stopped early — not a provider failure. Propagate
+            # without recording an outcome either way.
+            raise
+        except BaseException as exc:
+            self._breaker.record_failure(exc)
+            raise
+        else:
+            self._breaker.record_success()
+
+
+@traced
+def build_resilient_llm_client(settings: Settings, inner: LLMClient) -> LLMClient:
+    """Wrap ``inner`` in a circuit breaker configured from settings (ADR 0020).
+
+    Wired at the one place ``build_llm_client`` is consumed for serving
+    (``services.api.app``), so the breaker sits between the graph and the real
+    client. Left off the ``build_llm_client`` factory itself deliberately: that
+    factory's contract is "the raw client the profile may use", and a test that
+    asserts it returns a bare ``ScriptedLLMClient`` must keep passing.
+    """
+    breaker = CircuitBreaker(
+        name="anthropic_llm",
+        failure_threshold=settings.circuit_breaker_failure_threshold,
+        cooldown_seconds=settings.circuit_breaker_cooldown_seconds,
+        trip_on=PROVIDER_DOWN_ERRORS,
+    )
+    return CircuitBreakingLLMClient(inner, breaker)
 
 
 @traced

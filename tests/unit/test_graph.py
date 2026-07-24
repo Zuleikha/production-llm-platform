@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 from services.agents.base import ToolAgent
 from services.agents.tools import Tool, ToolRegistry, ToolResult
-from services.orchestrator.graph import AgentGraph
+from services.orchestrator.graph import AgentGraph, window_messages
 from services.orchestrator.llm import AssistantTurn, ScriptedLLMClient, TokenUsage
 
 
@@ -266,6 +266,70 @@ class TestToolAgent:
         )
 
         assert await agent.run("what is 8*8?") == "64"
+
+
+def _history(pairs: int) -> list[dict[str, Any]]:
+    """A conversation of ``pairs`` user/assistant turns, ending on a user turn."""
+    messages: list[dict[str, Any]] = []
+    for i in range(pairs):
+        messages.append({"role": "user", "content": f"q{i}"})
+        messages.append({"role": "assistant", "content": [{"type": "text", "text": f"a{i}"}]})
+    messages.append({"role": "user", "content": "final question"})
+    return messages
+
+
+class TestWindowMessages:
+    def test_returns_all_when_within_the_window(self) -> None:
+        messages = _history(2)  # 5 messages
+        assert window_messages(messages, 40) is messages
+
+    def test_returns_a_trailing_slice_starting_on_a_user_turn(self) -> None:
+        messages = _history(10)  # 21 messages
+        sent = window_messages(messages, 6)
+
+        assert len(sent) <= 6
+        assert sent[0]["role"] == "user"
+        assert isinstance(sent[0]["content"], str)
+        # Never drops the current (last) turn.
+        assert sent[-1] == messages[-1]
+
+    def test_keeps_the_whole_list_when_no_clean_boundary_exists(self) -> None:
+        # A long single tool loop: no plain-string user turn in the tail window.
+        messages: list[dict[str, Any]] = [{"role": "user", "content": "start"}]
+        for i in range(10):
+            messages.append(
+                {"role": "assistant", "content": [{"type": "tool_use", "id": f"t{i}", "name": "x"}]}
+            )
+            messages.append(
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{i}"}]}
+            )
+        # Window of 4 covers only tool_use/tool_result blocks → no safe boundary.
+        assert window_messages(messages, 4) is messages
+
+
+class TestContextCompaction:
+    async def test_only_the_windowed_slice_reaches_the_model(self) -> None:
+        llm = ScriptedLLMClient([_final("answer")])
+        graph = AgentGraph(llm, context_window_messages=6)
+        messages = _history(10)  # 21 messages
+
+        await graph.run(messages)
+
+        sent = llm.calls[0]["messages"]
+        assert sent == window_messages(messages, 6)
+        assert len(sent) < len(messages)
+
+    async def test_full_history_is_retained_in_state(self) -> None:
+        llm = ScriptedLLMClient([_final("answer")])
+        graph = AgentGraph(llm, context_window_messages=6)
+        messages = _history(10)
+
+        state = await graph.run(messages)
+
+        # State keeps everything: the 21 inputs plus the new assistant turn. The
+        # window narrowed only what the model saw, never what is carried/persisted.
+        assert len(state["messages"]) == len(messages) + 1
+        assert state["messages"][: len(messages)] == messages
 
 
 class TestSystemPrompt:

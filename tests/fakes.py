@@ -17,13 +17,15 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from services.orchestrator.llm import AssistantTurn, TextDelta, TurnCompleted
 from services.retrieval.base import DocumentChunk, RetrievedDocument, VectorStore
 from shared.datastores import Datastore
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
 
     from services.orchestrator.conversations import Turn
+    from services.orchestrator.llm import LLMEvent
 
 # --- Stage 8 security test fixtures (ADR 0019) ---
 # OBVIOUSLY-FAKE, test-only credential material. Mirrors config/environments/
@@ -248,6 +250,48 @@ class InMemoryVectorStore(VectorStore):
     async def query(self, embedding: Sequence[float], *, top_k: int) -> Sequence[RetrievedDocument]:
         self.queries.append(top_k)
         return self.documents[:top_k]
+
+
+class FaultInjectingLLMClient:
+    """An ``LLMClient`` that fails its first ``fail_times`` stream calls, then works.
+
+    For circuit-breaker tests (ADR 0020): it raises a given exception N times and
+    thereafter replays a fixed turn, so the closed → open → half-open → closed path
+    can be driven deterministically. It is an honest ``LLMClient`` — real streaming
+    on the success path — that makes **no network call**, exactly like
+    :class:`~services.orchestrator.llm.ScriptedLLMClient`. The exception is raised
+    before the first yield, so a caller sees it on the first ``__anext__``.
+    """
+
+    def __init__(
+        self,
+        *,
+        fail_times: int,
+        error: BaseException,
+        turn: AssistantTurn | None = None,
+    ) -> None:
+        self._remaining = fail_times
+        self._error = error
+        self._turn = turn or AssistantTurn(
+            text="ok", stop_reason="end_turn", raw_content=({"type": "text", "text": "ok"},)
+        )
+        self.calls = 0
+
+    async def stream(
+        self,
+        *,
+        system: str,
+        messages: Sequence[dict[str, Any]],
+        tools: Sequence[dict[str, Any]],
+        max_tokens: int,
+    ) -> AsyncIterator[LLMEvent]:
+        self.calls += 1
+        if self._remaining > 0:
+            self._remaining -= 1
+            raise self._error
+        for index, word in enumerate(self._turn.text.split()):
+            yield TextDelta(word if index == 0 else f" {word}")
+        yield TurnCompleted(self._turn)
 
 
 class FakePgPool:

@@ -6,13 +6,13 @@ Every stage prompt references this file. Update it at the end of each stage.
 | | |
 |---|---|
 | **Current version** | `0.1.0` |
-| **Current stage** | Stage 8 — Security (**complete**) |
-| **Overall progress** | **8 / 10 stages — 80%** |
-| **Next milestone** | Stage 9 — Reliability |
-| **Last updated** | 2026-07-23 |
+| **Current stage** | Stage 9 — Reliability (**complete**) |
+| **Overall progress** | **9 / 10 stages — 90%** |
+| **Next milestone** | Stage 10 — Portfolio |
+| **Last updated** | 2026-07-24 |
 
 ```
-Progress  [████████──]  8/10
+Progress  [█████████─]  9/10
 ```
 
 ---
@@ -83,16 +83,16 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
 | 2 | API | [stage-02-api.md](stage-summaries/stage-02-api.md) | [stage-02-api.md](verification-log/stage-02-api.md) | 2026-07-14 |
 | 3 | Agents | [stage-03-agents.md](stage-summaries/stage-03-agents.md) | [stage-03-agents.md](verification-log/stage-03-agents.md) | 2026-07-15 |
 | 4 | RAG | [stage-04-rag.md](stage-summaries/stage-04-rag.md) | [stage-04-rag.md](verification-log/stage-04-rag.md) | 2026-07-16 |
-| 5 | Observability | [stage-05-observability.md](stage-summaries/stage-05-observability.md) | _pending independent verification_ | 2026-07-18 |
-| 6 | MLOps | [stage-06-mlops.md](stage-summaries/stage-06-mlops.md) | _pending independent verification_ | 2026-07-20 |
+| 5 | Observability | [stage-05-observability.md](stage-summaries/stage-05-observability.md) | [stage-05-observability.md](verification-log/stage-05-observability.md) | 2026-07-18 |
+| 6 | MLOps | [stage-06-mlops.md](stage-summaries/stage-06-mlops.md) | [stage-06-mlops.md](verification-log/stage-06-mlops.md) | 2026-07-20 |
 | 7 | Kubernetes | [stage-07-kubernetes.md](stage-summaries/stage-07-kubernetes.md) | [stage-07-kubernetes.md](verification-log/stage-07-kubernetes.md) | 2026-07-21 |
 | 8 | Security | [stage-08-security.md](stage-summaries/stage-08-security.md) | [stage-08-security.md](verification-log/stage-08-security.md) | 2026-07-23 |
+| 9 | Reliability | [stage-09-reliability.md](stage-summaries/stage-09-reliability.md) | [stage-09-reliability.md](verification-log/stage-09-reliability.md) | 2026-07-24 |
 
 ## Remaining stages
 
 | Stage | Name | Summary file (fixed) | Objective |
 |:-----:|------|----------------------|-----------|
-| 9 | Reliability | `stage-09-reliability.md` | Load testing, chaos/failure testing, SLOs, resilience patterns |
 | 10 | Portfolio | `stage-10-portfolio.md` | Final polish, docs, demos, case study writeup |
 
 ---
@@ -224,14 +224,11 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
 
 ### ❌ Does not exist yet
 
-no load
-testing · **no OTel metrics pipeline** — the
-collector carries traces only and metrics stay on Prometheus (deliberate scope
-cut, ADR 0016), so Grafana's service-map / node-graph views are switched off
-rather than left empty; building that metrics-from-traces pipeline is deferred to
-Stage 9, which owns SLOs and needs it. Evaluation covers **RAG retrieval only**
-(ADR 0017) — agent tool-use and open-ended chat quality are out of scope, having
-no fixture corpus to grade against.
+Evaluation covers **RAG retrieval only** (ADR 0017) — agent tool-use and
+open-ended chat quality are out of scope, having no fixture corpus to grade
+against. **Per-conversation concurrency control** is still absent (ADR 0008's
+known gap, out of Stage 9's scope) and so is **circuit breaking around the Voyage
+call** (only the Anthropic call is wrapped, ADR 0020).
 
 All three datastores now hold real data — Postgres (conversation history), Redis
 (its cache), and **Qdrant (document vectors, new in Stage 4)**.
@@ -246,23 +243,36 @@ only** — no JWT/OAuth/IdP, no rotation/expiry beyond editing `API_KEYS`, singl
 authZ, and the rate limiter fails open on a Redis outage (all deferred by decision,
 ADR 0019). Secret management is **CI-scanning only** — no runtime secrets backend.
 
-Within the agent stack, deliberately deferred: prompt caching, context
-compaction (a long enough conversation will exceed the context window and fail),
-per-conversation concurrency control, and retry / circuit breaking around the
-Anthropic call beyond the SDK's defaults (Stage 9).
+Within the agent stack, **Stage 9 shipped** prompt caching, deterministic context
+compaction (windowing, not summarization), and a circuit breaker around the
+Anthropic call (ADR 0020). Still deferred: **per-conversation concurrency control**
+and **circuit breaking around the Voyage call** (only Anthropic is wrapped).
 
 API versioning (`/v1`) is in place, but **pagination conventions are deferred** —
 no endpoint returns a collection yet. Revisit when one does.
 
 ---
 
-## Next milestone — Stage 9 (Reliability)
+## Next milestone — Stage 10 (Portfolio)
 
-**Objective:** load testing, chaos/failure testing, SLOs, and resilience patterns
-(pool tuning, reconnect/circuit breaking, prompt caching, context compaction), plus
-the deferred **OTel metrics export** pipeline. Stage 8's rate-limiter fail-open and
-the absence of retry/circuit-breaking around the provider calls are the reliability
-surfaces Stage 9 owns.
+**Objective:** final polish, docs, demos, and a case-study writeup. No new platform
+capability — this stage packages what stages 1–9 built.
+
+**Resolved in Stage 9 (Reliability, ADR 0020):** the reliability surfaces are
+closed. A **circuit breaker** wraps the Anthropic `LLMClient` (opens on
+transport/5xx after a configurable threshold, fails fast with `503
+provider_unavailable`, half-open trial recovery; **never trips on a 400**; above the
+SDK's own retries, not instead of them). **Prompt caching** (`cache_control` on the
+system prompt + last tool spec, inside `AnthropicClient.stream`) and **deterministic
+context windowing** (outbound call only; full history still persisted; not
+summarization) close the Stage 3 agent omissions. The **OTel metrics pipeline**
+(spanmetrics/servicegraph → Prometheus) now backs Tempo's service map / node graph,
+additive to the app's own RED metrics (ADR 0016 unchanged). A **Locust** harness
+(two modes: cost-free `test` / opt-in billable `dev`) and a **chaos runbook** are
+opt-in and never CI. The **rate-limiter fail-open** is instrumented (counter +
+alert), **not reversed** (ADR 0019 stands). **SLOs** (`docs/slo.md`) add two alert
+rules to Stage 5's three. Still deferred by decision: per-conversation concurrency
+control and circuit breaking around the Voyage call.
 
 **Resolved in Stage 8:** the API is authenticated. `POST /v1/chat/completions`
 requires a bearer API key (salted-hash store, constant-time compare, one uniform

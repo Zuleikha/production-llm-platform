@@ -28,8 +28,11 @@ services:
       - "8000:8000"
     environment:
       # Profile selection. OS env (here) overrides config/environments/dev.env,
-      # which demonstrates the config precedence chain.
-      ENVIRONMENT: dev
+      # which demonstrates the config precedence chain. MUST be overridable: Stage
+      # 9's two-mode Locust harness runs the cost-free primary load against the
+      # `test` profile via `ENVIRONMENT=test docker compose up` (tests/load/README.md).
+      # A hardcoded `dev` silently ignored that override and booted dev regardless.
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
       LOG_FORMAT: json
       LOG_LEVEL: INFO
       API_PORT: "8000"

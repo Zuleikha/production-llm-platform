@@ -30,7 +30,7 @@ from services.monitoring.tracing import configure_tracing, shutdown_tracing
 from services.orchestrator.base import AgentOrchestrator
 from services.orchestrator.conversations import build_conversation_store
 from services.orchestrator.graph import AgentGraph
-from services.orchestrator.llm import build_llm_client
+from services.orchestrator.llm import build_llm_client, build_resilient_llm_client
 from services.retrieval.retriever import build_retriever
 from services.retrieval.tool import DocumentSearch
 from services.security.auth import build_auth_provider
@@ -73,11 +73,17 @@ def _build_engine(settings: Settings, registry: DatastoreRegistry) -> Orchestrat
     pools, and a store built before them would hold ``None`` forever. The same
     now goes for the retrieval tool, which needs a live Qdrant client.
     """
+    # The circuit breaker sits between the graph and the real client (ADR 0020):
+    # an Anthropic outage fails fast with 503 rather than tying every request up
+    # in the SDK's own timeout. Harmless under `test`, where the wrapped client is
+    # the scripted double that never raises a provider error.
+    llm = build_resilient_llm_client(settings, build_llm_client(settings))
     graph = AgentGraph(
-        build_llm_client(settings),
+        llm,
         tools=_build_tools(settings, registry),
         max_steps=settings.agent_max_steps,
         max_tokens=settings.anthropic_max_tokens,
+        context_window_messages=settings.context_window_messages,
     )
     store = build_conversation_store(
         postgres_pool=registry.postgres_pool,
@@ -131,7 +137,15 @@ def create_app(
         title="production-llm-platform :: api",
         version=get_version(),
         summary="Agent-backed chat API — health, readiness, version, metrics, completions.",
-        debug=settings.debug,
+        # NEVER wire settings.debug here. FastAPI passes `debug` to Starlette's
+        # ServerErrorMiddleware, and with debug=True that middleware returns a raw
+        # traceback and BYPASSES our registered catch-all Exception handler — so an
+        # unhandled 500 would leak internals in the response body, violating the
+        # standing "500s never leak internals" rule (CLAUDE.md) in the dev profile
+        # (where DEBUG=true). The full trace still goes to the server log via
+        # unhandled_exception_handler. settings.debug remains the uvicorn --reload
+        # switch in services/api/__main__.py, which is unaffected by this.
+        debug=False,
         lifespan=lifespan,
     )
     app.state.settings = settings

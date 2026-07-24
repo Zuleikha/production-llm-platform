@@ -133,6 +133,18 @@ class TestRateLimiter:
         degraded = [r for r in caplog.records if r.getMessage() == "ratelimit.degraded"]
         assert degraded and getattr(degraded[0], "reason", None) == "redis_error"
 
+    async def test_fail_open_increments_the_metric(self) -> None:
+        """The Stage 9 fail-open counter fires on every degraded allow (ADR 0020)."""
+        from shared.metrics import RATE_LIMITER_FAIL_OPEN
+
+        limiter = RedisRateLimiter(FakeRedisSource(None), limit=1, window_seconds=60)
+        before = RATE_LIMITER_FAIL_OPEN._value.get()
+
+        await limiter.check("p")
+        await limiter.check("p")
+
+        assert RATE_LIMITER_FAIL_OPEN._value.get() == before + 2
+
 
 class TestInjectionPatternGuardrail:
     """The excerpt screen: flags injection-shaped text, never blocks (ADR 0019)."""

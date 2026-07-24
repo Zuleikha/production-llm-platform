@@ -9,20 +9,29 @@ convention ("remember to patch it"), these fail.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+import httpx
 import pytest
+from anthropic import APIConnectionError, APITimeoutError, BadRequestError, InternalServerError
 from services.orchestrator.llm import (
+    PROVIDER_DOWN_ERRORS,
     AnthropicClient,
     AssistantTurn,
+    CircuitBreakingLLMClient,
     LLMClient,
     ScriptedLLMClient,
     TextDelta,
     TokenUsage,
     TurnCompleted,
     build_llm_client,
+    build_resilient_llm_client,
 )
 from shared.config import Settings, get_settings
+from shared.resilience import CircuitBreaker, CircuitBreakerOpenError, CircuitState
+
+from tests.fakes import FaultInjectingLLMClient
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -159,3 +168,218 @@ class TestScriptedLLMClient:
 
     async def test_satisfies_the_protocol(self) -> None:
         assert isinstance(ScriptedLLMClient(), LLMClient)
+
+
+# --- Prompt caching (Stage 9, ADR 0020) ------------------------------------
+
+
+class _FakeStream:
+    """The async context-manager + async-iterator shape the SDK's stream returns."""
+
+    def __init__(self, final: Any) -> None:
+        self._final = final
+
+    async def __aenter__(self) -> _FakeStream:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    def __aiter__(self) -> _FakeStream:
+        return self
+
+    async def __anext__(self) -> Any:
+        raise StopAsyncIteration
+
+    async def get_final_message(self) -> Any:
+        return self._final
+
+
+class _SpyMessages:
+    """Records the kwargs passed to ``messages.stream`` instead of calling the API."""
+
+    def __init__(self) -> None:
+        self.kwargs: dict[str, Any] | None = None
+
+    def stream(self, **kwargs: Any) -> _FakeStream:
+        self.kwargs = kwargs
+        text_block = SimpleNamespace(
+            type="text", text="hi", model_dump=lambda **_: {"type": "text", "text": "hi"}
+        )
+        final = SimpleNamespace(
+            content=[text_block],
+            model="claude-opus-4-8",
+            stop_reason="end_turn",
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+        return _FakeStream(final)
+
+
+class _SpyAnthropic:
+    def __init__(self) -> None:
+        self.messages = _SpyMessages()
+
+
+def _spied_client() -> tuple[AnthropicClient, _SpyMessages]:
+    """A real ``AnthropicClient`` (dev profile) with the SDK swapped for a spy.
+
+    Construction dials nothing; the spy replaces the transport before ``stream``,
+    so no network call happens and the test profile's hermetic guard is untouched.
+    """
+    client = AnthropicClient(Settings(environment="dev", anthropic_api_key="sk-ant-x"))
+    spy = _SpyAnthropic()
+    client._client = spy  # type: ignore[assignment]
+    return client, spy.messages
+
+
+class TestPromptCaching:
+    async def test_system_prompt_is_sent_as_a_cached_content_block(self) -> None:
+        client, messages = _spied_client()
+
+        await _drain(client, system="SYSTEM", messages=[{"role": "user", "content": "hi"}])
+
+        assert messages.kwargs is not None
+        assert messages.kwargs["system"] == [
+            {"type": "text", "text": "SYSTEM", "cache_control": {"type": "ephemeral"}}
+        ]
+
+    async def test_only_the_last_tool_spec_is_marked_cacheable(self) -> None:
+        client, messages = _spied_client()
+        tools = [
+            {"name": "a", "description": "A", "input_schema": {}},
+            {"name": "b", "description": "B", "input_schema": {}},
+        ]
+
+        async for _ in client.stream(
+            system="S", messages=[{"role": "user", "content": "hi"}], tools=tools, max_tokens=8
+        ):
+            pass
+
+        sent = messages.kwargs["tools"]  # type: ignore[index]
+        assert "cache_control" not in sent[0]
+        assert sent[-1]["cache_control"] == {"type": "ephemeral"}
+
+    async def test_marking_tools_does_not_mutate_the_caller_specs(self) -> None:
+        """The registry's tool specs are shared and long-lived — must stay clean."""
+        client, _ = _spied_client()
+        tools = [{"name": "a", "description": "A", "input_schema": {}}]
+
+        async for _ in client.stream(
+            system="S", messages=[{"role": "user", "content": "hi"}], tools=tools, max_tokens=8
+        ):
+            pass
+
+        assert "cache_control" not in tools[0]
+
+    async def test_no_tools_is_handled(self) -> None:
+        client, messages = _spied_client()
+
+        await _drain(client, messages=[{"role": "user", "content": "hi"}])
+
+        assert messages.kwargs["tools"] == []  # type: ignore[index]
+
+
+# --- Circuit breaker around the LLM client (Stage 9, ADR 0020) --------------
+
+
+def _provider_breaker(clock: Any, *, threshold: int = 3, cooldown: float = 30.0) -> CircuitBreaker:
+    return CircuitBreaker(
+        name="test-llm",
+        failure_threshold=threshold,
+        cooldown_seconds=cooldown,
+        trip_on=PROVIDER_DOWN_ERRORS,
+        clock=clock,
+    )
+
+
+def _conn_error() -> APIConnectionError:
+    return APIConnectionError(message="down", request=httpx.Request("POST", "http://x"))
+
+
+class _MutableClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class TestProviderDownErrors:
+    def test_timeout_and_5xx_qualify_but_a_400_does_not(self) -> None:
+        req = httpx.Request("POST", "http://x")
+        assert isinstance(APITimeoutError(request=req), PROVIDER_DOWN_ERRORS)
+        assert isinstance(
+            InternalServerError("x", response=httpx.Response(500, request=req), body=None),
+            PROVIDER_DOWN_ERRORS,
+        )
+        assert not isinstance(
+            BadRequestError("x", response=httpx.Response(400, request=req), body=None),
+            PROVIDER_DOWN_ERRORS,
+        )
+
+
+class TestCircuitBreakingLLMClient:
+    async def test_passes_through_when_closed(self) -> None:
+        inner = FaultInjectingLLMClient(fail_times=0, error=_conn_error())
+        wrapped = CircuitBreakingLLMClient(inner, _provider_breaker(_MutableClock()))
+
+        events = await _drain(wrapped)
+
+        assert isinstance(events[-1], TurnCompleted)
+
+    async def test_trips_after_n_failures_then_fails_fast(self) -> None:
+        clock = _MutableClock()
+        inner = FaultInjectingLLMClient(fail_times=99, error=_conn_error())
+        breaker = _provider_breaker(clock, threshold=3)
+        wrapped = CircuitBreakingLLMClient(inner, breaker)
+
+        # Three real attempts that each raise the provider error and are recorded.
+        for _ in range(3):
+            with pytest.raises(APIConnectionError):
+                await _drain(wrapped)
+
+        assert breaker.state is CircuitState.OPEN
+        # Now open: the next call fails fast WITHOUT touching the inner client.
+        calls_before = inner.calls
+        with pytest.raises(CircuitBreakerOpenError):
+            await _drain(wrapped)
+        assert inner.calls == calls_before
+
+    async def test_half_open_trial_recovers_the_breaker(self) -> None:
+        clock = _MutableClock()
+        # Fail exactly `threshold` times, then succeed.
+        inner = FaultInjectingLLMClient(fail_times=3, error=_conn_error())
+        breaker = _provider_breaker(clock, threshold=3, cooldown=30)
+        wrapped = CircuitBreakingLLMClient(inner, breaker)
+
+        for _ in range(3):
+            with pytest.raises(APIConnectionError):
+                await _drain(wrapped)
+        opened_state = breaker.state
+        assert opened_state is CircuitState.OPEN
+
+        clock.now += 30  # cooldown elapses → next call is the half-open trial
+        events = await _drain(wrapped)
+
+        assert isinstance(events[-1], TurnCompleted)
+        recovered_state = breaker.state
+        assert recovered_state is CircuitState.CLOSED
+
+    async def test_a_400_does_not_trip_the_breaker(self) -> None:
+        req = httpx.Request("POST", "http://x")
+        bad = BadRequestError("bad", response=httpx.Response(400, request=req), body=None)
+        inner = FaultInjectingLLMClient(fail_times=99, error=bad)
+        breaker = _provider_breaker(_MutableClock(), threshold=2)
+        wrapped = CircuitBreakingLLMClient(inner, breaker)
+
+        for _ in range(5):
+            with pytest.raises(BadRequestError):
+                await _drain(wrapped)
+
+        # A caller-side 400 is never "the provider is down" — breaker stays closed.
+        assert breaker.state is CircuitState.CLOSED
+
+    def test_factory_wraps_in_a_breaker(self) -> None:
+        wrapped = build_resilient_llm_client(Settings(environment="test"), ScriptedLLMClient())
+        assert isinstance(wrapped, CircuitBreakingLLMClient)
+        assert isinstance(wrapped, LLMClient)

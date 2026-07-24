@@ -1,0 +1,42 @@
+# Test-profile override for the `api` service — Stage 9, ADR 0020 (addendum 2).
+#
+# Purpose: run the cost-free primary Locust mode (tests/load/README.md Mode 1)
+# with the container using config/environments/test.env's fixed test-principal
+# key — with ZERO required host-side setup.
+#
+# The bug this fixes: the base docker-compose.yml interpolates the auth/provider
+# secrets from root .env via `${VAR:-}` at the COMPOSE layer, before the app runs.
+# That injects them as real container OS env vars — the HIGHEST precedence tier —
+# so the app's "the test profile ignores root .env" logic (shared/config.py) never
+# applies: API_KEYS arrives already holding the *dev* value and every chat request
+# 401s under the test profile.
+#
+# Why LITERAL values here (not the null/passthrough form, not `--env-file`):
+#   * The null form (`API_KEYS:`) does NOT help — docker compose loads root .env
+#     into the environment it uses for passthrough too, so it still resolves to the
+#     dev value (verified with `docker compose config`).
+#   * `--env-file config/environments/test.env` fixes API_KEYS but the host SHELL
+#     still overrides interpolation, so a shell-exported key (e.g. ANTHROPIC_API_KEY)
+#     leaks a real credential into the throwaway load container.
+#   * A LITERAL value in `environment:` wins over BOTH the shell and root .env, so
+#     this is the only form that GUARANTEES the test key with zero host setup.
+#
+# The auth values below are config/environments/test.env's fixed, obviously-fake
+# test-principal fixture — KEEP IN SYNC WITH test.env (a hermetic test,
+# tests/unit/test_load_profile_compose.py, fails if they drift apart). The two
+# provider keys are pinned empty: the test profile cannot construct a real
+# Anthropic/Voyage client (ADR 0009/0011), so it never reads them, and empty keeps
+# a real host key out of the load container.
+#
+# Invoke (self-contained — this file sets ENVIRONMENT=test, no host prefix needed):
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build
+services:
+  api:
+    environment:
+      ENVIRONMENT: test
+      # Fixed test-principal fixture — mirrors config/environments/test.env.
+      API_KEYS: test-principal:231965b3b3f3d6030b500d21b1984e72dbba04d4af29ceacae9bb3a1ee435034
+      API_KEY_HASH_SECRET: test-pepper-not-a-real-secret
+      # Unused under the test profile; pinned empty so no real host key is baked in.
+      ANTHROPIC_API_KEY: ""
+      VOYAGE_API_KEY: ""

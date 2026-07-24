@@ -3,7 +3,7 @@
 A production-grade LLM platform, built in **10 deliberate stages** — each stage
 adding one layer of real production concern, documented as it goes.
 
-> ### 🚧 Stage 8 of 10 complete — Security
+> ### 🚧 Stage 9 of 10 complete — Reliability
 >
 > **What exists today:** a FastAPI service whose chat endpoint runs a real
 > **LangGraph agent loop against the Anthropic API** — it reasons, calls tools,
@@ -33,7 +33,16 @@ adding one layer of real production concern, documented as it goes.
 > return the same `401`), a **Redis-backed per-principal rate limiter** (`429`,
 > fail-open on a Redis outage), and heuristic **input/excerpt/egress guardrails** on
 > top of the nonce fence — plus two hermetic CI gates, **gitleaks** (secret scan) and
-> **pip-audit** (dependency scan). Plus everything from Stages 1–3: **real
+> **pip-audit** (dependency scan). **The platform is now hardened for reliability**
+> ([ADR 0020](docs/adr/0020-reliability-load-chaos-resilience-slos.md)): a **circuit
+> breaker** wraps the Anthropic call (trips on transport/5xx only, never a `400`,
+> failing fast with `503 provider_unavailable`), **prompt caching** + deterministic
+> **context-window** trimming keep long conversations and repeated calls cheap,
+> spanmetrics/servicegraph connectors turn on Tempo's **service map**, and two new
+> symptom-level Grafana alerts cover the breaker opening and the rate limiter's
+> fail-open path. An opt-in **Locust harness** (never CI) drives pool tuning and a
+> **chaos runbook** proves Postgres/Redis/Qdrant failure behavior under real
+> concurrent load, not a single curl. Plus everything from Stages 1–3: **real
 > token accounting**, **conversation history in Postgres** behind a **Redis
 > read-through cache**, SSE streaming, health / readiness / version / metrics
 > endpoints, structured JSON logging, typed layered configuration, pooled datastore
@@ -42,11 +51,13 @@ adding one layer of real production concern, documented as it goes.
 > **What does not exist yet:** authentication is **API-key only** — no JWT/OAuth/IdP,
 > no key rotation, single-tier authZ, and no per-source RAG trust tiers (all deferred
 > by decision, [ADR 0019](docs/adr/0019-api-authentication-rate-limiting-and-guardrails.md)).
-> No load/chaos testing or SLOs (Stage 9). Metrics are **not** exported through the
-> OTel collector (traces only,
-> [ADR 0016](docs/adr/0016-observability-stack.md)) — deferred to Stage 9.
-> Evaluation covers **RAG retrieval only**. Remaining future-stage components are
-> **interface stubs that raise `NotImplementedError`**.
+> **No per-conversation concurrency control** (two concurrent turns on one
+> conversation collide loudly, not serialised) and **no LLM-based summarization**
+> (windowing was chosen instead, deliberately) — both explicit Stage 9 non-goals,
+> [ADR 0020](docs/adr/0020-reliability-load-chaos-resilience-slos.md). Only the
+> Anthropic call is circuit-broken; Voyage is not. Evaluation covers **RAG retrieval
+> only**. Remaining future-stage components are **interface stubs that raise
+> `NotImplementedError`**.
 > See [docs/architecture.md](docs/architecture.md) for the current-vs-planned split.
 
 ---
@@ -58,7 +69,7 @@ adding one layer of real production concern, documented as it goes.
 | **Reproducible** | Exact `==` pins, committed `uv.lock`, `--frozen` installs — laptop, CI and image resolve identically. |
 | **Observable** | JSON logs with request-id correlation; Prometheus `/metrics`; `@traced` emits real **OpenTelemetry spans** → Collector → Grafana Tempo ([ADR 0016](docs/adr/0016-observability-stack.md)). |
 | **Typed & tested** | mypy `strict` and ruff from commit #1, enforced in CI. The suite is **hermetic by construction** — it cannot call a paid API ([ADR 0009](docs/adr/0009-hermetic-llm-testing.md)). |
-| **Stable seams** | Proven repeatedly, not asserted: Stage 3 replaced the mock engine with a full agent stack behind the same `CompletionEngine` protocol; Stage 4 added retrieval as one more `Tool`; Stage 5 gave `@traced` a real OTel backend without touching a call site. None changed a route or the SSE format. Stage 8 then filled the `AuthProvider`/`Guardrail` contracts (auth, rate limiting, guardrails) as FastAPI dependencies around the same route — again without re-cutting it. |
+| **Stable seams** | Proven repeatedly, not asserted: Stage 3 replaced the mock engine with a full agent stack behind the same `CompletionEngine` protocol; Stage 4 added retrieval as one more `Tool`; Stage 5 gave `@traced` a real OTel backend without touching a call site. None changed a route or the SSE format. Stage 8 then filled the `AuthProvider`/`Guardrail` contracts (auth, rate limiting, guardrails) as FastAPI dependencies around the same route — again without re-cutting it. Stage 9 wrapped the same `LLMClient` protocol in a circuit breaker (`CircuitBreakingLLMClient`) — `AgentGraph` takes it as a drop-in, no call site changed. |
 | **Secure by default** | No secrets in git, env-only credentials, non-root container, errors that never leak internals. |
 | **Honest** | Docs label planned work as planned. Stubs raise instead of faking. |
 
@@ -140,12 +151,14 @@ services/
   monitoring/      ✅ tracing seam — OTLP/Local providers, OTel span export (Stage 5)
   evaluation/      ✅ RetrievalEvaluator · metrics · dataset · baseline · LLM-judge (Stage 6)
   security/        ✅ ApiKeyAuthProvider · RedisRateLimiter · input/excerpt/egress guardrails (Stage 8)
-shared/            ✅ config · logging · observability · datastores · migrations · version
+shared/            ✅ config · logging · observability · datastores · migrations · version ·
+                      resilience (circuit breaker) · metrics (x-cutting counters) (Stage 9)
 data/corpus/       ✅ the RAG corpus — ingested by scripts/ingest.py (Stage 4)
 data/eval/         ✅ eval dataset + regression baseline — scored by scripts/evaluate.py (Stage 6)
 migrations/        ✅ forward-only raw SQL, applied on startup
 config/            committed non-secret env profiles (dev/test/prod)
 tests/             ✅ unit tests mirroring the source tree
+tests/load/        ✅ opt-in Locust harness, never CI — pool tuning + chaos load (Stage 9)
 examples/          runnable examples
 infrastructure/    docker/ ✅   kubernetes/ ✅ Helm chart, kind-verified (Stage 7)   terraform/ ✅ AWS, validated-never-applied (Stage 7)
 scripts/           helper scripts — ingest.py (costs $ outside test) · evaluate.py (RAG eval gate)
@@ -165,12 +178,12 @@ Each stage ends with a summary document at a **fixed** filename:
 | 2 | API | [`stage-02-api.md`](docs/stage-summaries/stage-02-api.md) | [log](docs/verification-log/stage-02-api.md) | ✅ complete |
 | 3 | Agents | [`stage-03-agents.md`](docs/stage-summaries/stage-03-agents.md) | [log](docs/verification-log/stage-03-agents.md) | ✅ complete |
 | 4 | RAG | [`stage-04-rag.md`](docs/stage-summaries/stage-04-rag.md) | [log](docs/verification-log/stage-04-rag.md) | ✅ complete |
-| 5 | Observability | [`stage-05-observability.md`](docs/stage-summaries/stage-05-observability.md) | — | ✅ complete |
-| 6 | MLOps | [`stage-06-mlops.md`](docs/stage-summaries/stage-06-mlops.md) | — | ✅ complete |
+| 5 | Observability | [`stage-05-observability.md`](docs/stage-summaries/stage-05-observability.md) | [log](docs/verification-log/stage-05-observability.md) | ✅ complete |
+| 6 | MLOps | [`stage-06-mlops.md`](docs/stage-summaries/stage-06-mlops.md) | [log](docs/verification-log/stage-06-mlops.md) | ✅ complete |
 | 7 | Kubernetes | [`stage-07-kubernetes.md`](docs/stage-summaries/stage-07-kubernetes.md) | [log](docs/verification-log/stage-07-kubernetes.md) | ✅ complete |
-| 8 | Security | [`stage-08-security.md`](docs/stage-summaries/stage-08-security.md) | [log](docs/verification-log/stage-08-security.md) | ✅ **current — complete** |
-| 9 | Reliability | `stage-09-reliability.md` | — | ⬜ next |
-| 10 | Portfolio | `stage-10-portfolio.md` | — | ⬜ planned |
+| 8 | Security | [`stage-08-security.md`](docs/stage-summaries/stage-08-security.md) | [log](docs/verification-log/stage-08-security.md) | ✅ complete |
+| 9 | Reliability | [`stage-09-reliability.md`](docs/stage-summaries/stage-09-reliability.md) | [log](docs/verification-log/stage-09-reliability.md) | ✅ **current — complete** |
+| 10 | Portfolio | `stage-10-portfolio.md` | — | ⬜ next |
 
 Live progress: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
 

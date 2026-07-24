@@ -62,7 +62,13 @@ class Settings(BaseSettings):
     redis_url: str | None = None
     qdrant_url: str | None = None
 
-    # --- Datastore pooling (ADR 0005) ---
+    # --- Datastore pooling (ADR 0005; reviewed Stage 9, ADR 0020) ---
+    # Pool sizes are the knob the primary (cost-free) Locust mode is meant to tune:
+    # run realistic concurrency against the test-profile stack, watch where each
+    # pool queues or times out, set the default from that. The numbers below are
+    # the Stage-5 starting points, left unchanged pending that observed run — see
+    # the stage summary for exactly what was and was not executed this session, and
+    # tests/load/README.md for the command that produces the number.
     db_pool_min_size: int = Field(default=1, ge=1)
     db_pool_max_size: int = Field(default=10, ge=1)
     redis_pool_max_connections: int = Field(default=10, ge=1)
@@ -86,7 +92,33 @@ class Settings(BaseSettings):
     # tools cannot spin forever. Counts model calls, not tool calls.
     agent_max_steps: int = Field(default=6, ge=1)
 
-    # --- Conversation cache (Stage 3, ADR 0008) ---
+    # --- Reliability: circuit breaker around the Anthropic call (Stage 9, ADR 0020) ---
+    # The breaker trips after this many *consecutive* provider-down failures
+    # (transport / 5xx — never a 400), then fails fast with 503 for the cooldown
+    # before allowing one half-open trial. Threshold 5: high enough to ride out an
+    # isolated blip (the SDK already retries individual transient errors), low
+    # enough to trip well before a sustained outage ties up many requests each
+    # waiting a full ANTHROPIC_TIMEOUT_SECONDS. Cooldown 30s: same order as one
+    # call's timeout budget — long enough not to hammer a down provider, short
+    # enough that recovery is noticed within ~30s.
+    circuit_breaker_failure_threshold: int = Field(default=5, ge=1)
+    circuit_breaker_cooldown_seconds: float = Field(default=30.0, gt=0)
+
+    # --- Reliability: context compaction (Stage 9, ADR 0020) ---
+    # The model sees at most this many trailing messages; older turns are dropped
+    # from the outbound call only, never from AgentState["messages"] or what is
+    # persisted to Postgres. 40 messages ≈ 20 conversational turns (or fewer with
+    # tool loops), comfortably inside the model's context while bounding unbounded
+    # growth. Deterministic count windowing, not LLM summarization (ADR 0020).
+    context_window_messages: int = Field(default=40, ge=1)
+
+    # --- Conversation cache (Stage 3, ADR 0008; reviewed Stage 9, ADR 0020) ---
+    # 300s was flagged as an untuned guess (ADR 0008). Stage 9 reviewed it and
+    # left it deliberately: the cache is a latency optimisation over Postgres (a
+    # miss degrades to a DB read, never an error), so the TTL only trades memory
+    # for hit-rate and cannot cause a correctness failure under load. The Locust
+    # harness that would tune it against a real hit/miss curve is documented in
+    # ADR 0020 / tests/load; see the stage summary for what was and was not run.
     conversation_cache_ttl_seconds: int = Field(default=300, gt=0)
 
     # --- Voyage AI / embeddings (Stage 4, ADR 0011) ---

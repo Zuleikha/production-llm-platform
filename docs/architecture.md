@@ -38,7 +38,7 @@ tracing without touching any of it.
 
 ---
 
-## Current state (Stage 8 — built and verified)
+## Current state (Stage 9 — built and verified)
 
 ### Component map
 
@@ -328,11 +328,50 @@ finding. Per-source trust tiering and a cloud secrets backend are explicitly
 deferred (ADR 0019), tied to a corpus-admission or cloud-account change that has
 not happened.
 
+### Reliability (Stage 9, ADR 0020)
+
+Stage 9 makes the platform survive load and partial failure **on purpose**. Four
+resilience patterns, a load/chaos harness, an additive metrics pipeline, and two
+new SLO alerts — none of which changed a seam.
+
+| Concern | Mechanism | Where |
+|---------|-----------|-------|
+| Provider outage | **Circuit breaker** around `LLMClient`: after N consecutive transport/5xx failures it opens and fails fast with **`503 provider_unavailable`** for a cooldown, then a half-open trial closes it. **A 400 never trips it.** Sits *above* the SDK's own retries, not instead of them. | `shared/resilience.py` (generic) · `CircuitBreakingLLMClient` (`orchestrator/llm.py`) · wired in `app._build_engine` |
+| Repeated prompt cost | **Prompt caching**: a `cache_control` breakpoint on the system prompt and the last tool spec, entirely inside `AnthropicClient.stream`. The `LLMClient` wire shape is unchanged. | `orchestrator/llm.py` |
+| Unbounded context | **Context compaction**: deterministic message-count windowing of the *outbound* call only. `AgentState["messages"]` and what is persisted are untouched; the window starts on a genuine user turn so tool pairing never breaks. **Not** LLM summarization. | `window_messages` in `orchestrator/graph.py` |
+| Datastore contention | **Pool tuning** reviewed against the load harness (ADR 0020). | `shared/config.py` |
+| Service topology | **spanmetrics/servicegraph** connectors + a `prometheus` exporter on the collector drive Tempo's now-enabled **service map / node graph** — RED metrics *derived from spans*, additive to (not a copy of) the app's own `/metrics` (ADR 0016 unchanged). | `otel-collector/config.yml` · `prometheus.yml` · `datasources/tempo.yml` |
+
+**The breaker fails fast, it does not hang.** An open breaker raises before the
+client is touched, so an Anthropic outage returns a distinct 503 immediately
+rather than every request waiting out the SDK timeout. It is proven hermetically
+by a fault-injecting `LLMClient` double (`tests/fakes.py`) — the real client is
+never exercised, same posture as ADR 0009.
+
+**Load & chaos are opt-in, never CI.** A Locust harness (`tests/load/`,
+transiently installed) runs in two modes — cost-free against the `test` stack,
+opt-in billable against a `dev` stack — and a manual runbook
+(`docs/runbooks/chaos-testing.md`) proves each datastore's already-specified
+failure behaviour under real load. The Redis rate-limiter fail-open (ADR 0019) is
+**instrumented, not reversed**: a `rate_limiter_fail_open_total` counter and a new
+alert make it visible.
+
+**SLOs** (`docs/slo.md`) are stated targets backed by Grafana alerts — Stage 5's
+three rules unchanged, plus two new ones (circuit breaker open; rate-limiter
+fail-open). Both fire on a counter of edges on the app's own `/metrics`
+(`shared/metrics.py`).
+
+Still deferred (restated): **per-conversation concurrency control** (ADR 0008's
+other gap — not in Stage 9's scope) and **LLM-based summarization** (rejected in
+ADR 0020).
+
 ### `shared/` foundation
 
 | Module | Responsibility |
 |--------|----------------|
 | `config.py` | Typed `Settings` (pydantic-settings), layered profiles — see ADR 0003. `prod` refuses to boot without all three datastore URLs, `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, *and* the API-key auth material (`API_KEYS` + `API_KEY_HASH_SECRET`, ADR 0019) |
+| `resilience.py` | Generic **circuit breaker** (closed/open/half-open) + `CircuitBreakerOpenError` — cross-cutting infra, no `services/` import (ADR 0020) |
+| `metrics.py` | Cross-cutting Prometheus counters (`circuit_breaker_opened_total`, `rate_limiter_fail_open_total`) raised below the `api` layer (ADR 0020) |
 | `logging.py` | JSON formatter (`timestamp`, `level`, `service`, `environment`, `request_id`, `logger`, `message`, `exception`) + console formatter; routes uvicorn logs through one handler |
 | `observability.py` | `@traced` — a structured DEBUG log **and** a real OpenTelemetry span (Stage 5) on enter/exit/duration/error; sync + async; PEP 695 typed. Imports the OTel **API** only, never the SDK, so `shared/` still never imports `services/` (ADR 0016) |
 | `datastores.py` | `Datastore` ABC + Postgres/Redis/Qdrant implementations and `DatastoreRegistry` — see ADR 0005 |
@@ -564,9 +603,9 @@ builds it.
 
 | Component | Stage | Status today |
 |-----------|-------|--------------|
-| Reliability — load testing, chaos, SLOs, pool tuning, reconnect/circuit breaking, **OTel metrics export** | 9 | **Nothing exists.** |
+| Portfolio — final polish, docs, demos, case-study writeup | 10 | **Not started.** |
 
-### Deliberate non-goals as of Stage 8
+### Deliberate non-goals as of Stage 9
 
 **Authentication is now API-key only** (Stage 8, ADR 0019): no JWT, no OAuth, no
 external IdP, no key rotation/expiry beyond editing `API_KEYS` and restarting, and
@@ -590,10 +629,15 @@ control (ADR 0014); Stage 8 adds heuristic excerpt screening and a log-only answ
 egress check on top (ADR 0019), but still **no classifier and no per-source trust
 tiers** — those wait on a corpus-admission change that has not happened.
 
-Within the agent stack, the Stage 3 omissions still stand: no prompt caching, no
-context compaction, no per-conversation concurrency control, and no retry or
-circuit breaking around the Anthropic *or Voyage* call beyond the SDKs' defaults.
-Stage 9 owns the reliability of those calls.
+Within the agent stack, **Stage 9 closed most of the Stage 3 omissions** (ADR
+0020): prompt caching, deterministic context compaction, and a circuit breaker
+around the Anthropic call now exist. Two omissions remain deliberate:
+**per-conversation concurrency control** (ADR 0008's other known gap, out of Stage
+9's scope) and **circuit breaking around the Voyage call** (only the Anthropic
+call is wrapped; a Voyage outage degrades to ungrounded answers already). Context
+compaction is **windowing, not summarization** — a long conversation drops its
+oldest turns from the model call, honestly, rather than paying for a second
+summarizing model call (ADR 0020).
 
 ---
 
@@ -663,4 +707,6 @@ or a vulnerable dependency (ADR 0019).
 - [ADR 0017 — RAG evaluation, recall@k/MRR, and the regression gate](adr/0017-rag-evaluation-and-regression-gate.md)
 - [ADR 0018 — Kubernetes via Helm, dev-vs-managed datastores, validate-not-apply Terraform](adr/0018-kubernetes-and-terraform.md)
 - [ADR 0019 — API-key auth, rate limiting, RAG guardrails, CI secret scanning](adr/0019-api-authentication-rate-limiting-and-guardrails.md)
+- [ADR 0020 — Reliability: load/chaos testing, circuit breaker, prompt caching, context compaction, pool tuning, OTel metrics pipeline, SLOs](adr/0020-reliability-load-chaos-resilience-slos.md)
+- [SLOs](slo.md) — service level objectives and their alert rules
 - [PROJECT_STATUS.md](PROJECT_STATUS.md) — roadmap and progress

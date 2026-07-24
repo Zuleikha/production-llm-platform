@@ -1,0 +1,118 @@
+# ---------------------------------------------------------------------------
+# Grafana unified alerting — Stage 9 reliability rules (ADR 0020).
+#
+# ADDITIVE to api-rules.yml (Stage 5's three symptom rules), which is left
+# untouched. These two cover failure modes Stage 9 introduced or newly
+# instrumented, in the same symptom-level style: a threshold, a `for`, a
+# severity, and a one-line why in the annotations.
+#
+# Both fire on a counter of *edges* exposed on the API's own /metrics
+# (shared/metrics.py) and scraped by the existing `api` job — so no new scrape
+# target is needed for alerting (the collector's :8889 target is for the service
+# map, a different signal). `increase(...[5m]) > 0` means "did this boundary get
+# crossed at all in the window": there is no healthy background rate of either
+# event to threshold against, so any occurrence is the signal.
+# ---------------------------------------------------------------------------
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: reliability-symptoms
+    folder: production-llm-platform
+    interval: 1m
+    rules:
+      # -------------------------------------------------------------------
+      - uid: reliability-circuit-breaker-open
+        title: Circuit breaker around the model provider is open
+        condition: THRESHOLD
+        for: 1m
+        labels:
+          severity: critical
+          service: api
+        annotations:
+          summary: "The Anthropic circuit breaker opened — chat is failing fast with 503."
+          description: >-
+            An open breaker means CIRCUIT_BREAKER_FAILURE_THRESHOLD consecutive
+            transport/5xx failures were seen and the platform is now treating the
+            model provider as down: every chat request fails fast with 503
+            provider_unavailable rather than waiting out the SDK's timeout (ADR
+            0020). That is a caller-visible outage of the one paid endpoint —
+            critical, and not covered by Stage 5's rules (a fast 503 is neither a
+            5xx-rate spike nor a latency spike). The 1m `for` rides out a single
+            open→half-open→closed recovery blip; a breaker that stays open past a
+            minute is a real provider incident. Counter of the open *edge*, so it
+            fires on the transition, not once per rejected request.
+          runbook: "Check llm.turn_completed / circuit_breaker.state_change logs and the Anthropic status page; the breaker self-heals via a half-open trial after the cooldown."
+        isPaused: false
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: OPENED
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: OPENED
+              instant: true
+              editorMode: code
+              expr: >-
+                sum(increase(circuit_breaker_opened_total{job="api"}[5m]))
+          - refId: THRESHOLD
+            datasourceUid: __expr__
+            model:
+              refId: THRESHOLD
+              type: threshold
+              expression: OPENED
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+
+      # -------------------------------------------------------------------
+      - uid: reliability-rate-limiter-fail-open
+        title: Rate limiter is failing open on a Redis outage
+        condition: THRESHOLD
+        for: 5m
+        labels:
+          severity: warning
+          service: api
+        annotations:
+          summary: "The rate limiter allowed requests it could not count — Redis is unavailable."
+          description: >-
+            The limiter fails open by design: a limiter outage must not become an
+            outage of the paid endpoint (ADR 0008/0019), and that decision is not
+            up for debate. This alert instruments it — while it fires, requests are
+            NOT being rate-limited, so a runaway or abusive caller is currently
+            uncapped. Warning, not critical: the endpoint is still serving (the
+            opposite failure of the breaker rule), but someone should know Redis is
+            down and the cap is off. The 5m `for` distinguishes a sustained Redis
+            outage from a one-off reconnect blip. Counter increments once per
+            fail-open allow (shared/metrics.py).
+          runbook: "curl localhost:8000/ready — it names Redis; the conversation cache is degrading to Postgres reads at the same time (ADR 0008)."
+        isPaused: false
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: FAILOPEN
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: FAILOPEN
+              instant: true
+              editorMode: code
+              expr: >-
+                sum(increase(rate_limiter_fail_open_total{job="api"}[5m]))
+          - refId: THRESHOLD
+            datasourceUid: __expr__
+            model:
+              refId: THRESHOLD
+              type: threshold
+              expression: FAILOPEN
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]

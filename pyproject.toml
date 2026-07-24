@@ -173,14 +173,20 @@ disallow_untyped_defs = true
 no_implicit_reexport = true
 plugins = ["pydantic.mypy"]
 files = ["services", "shared", "tests", "scripts"]
+# tests/load/ (Locust) is not part of the hermetic suite and `locust` is not a
+# locked dependency (installed transiently per run — ADR 0020), so it has no stubs
+# here and must not be type-checked as part of the gate.
+exclude = ["^tests/load/"]
 # `scripts/` is not a package and is imported by path in tests (the build script
 # is a CLI, not a library). Tell mypy where to resolve it from.
 mypy_path = "scripts"
 
 [[tool.mypy.overrides]]
 # Third-party libs without bundled type hints — do not fail strict mode on them.
-# asyncpg ships no py.typed marker (as of 0.31.0); redis and httpx do.
-module = ["prometheus_client.*", "asyncpg.*"]
+# asyncpg ships no py.typed marker (as of 0.31.0); redis and httpx do. PyYAML 6.0
+# ships no py.typed either (stubs live in the separate types-PyYAML); it is used
+# only by the compose-override drift-guard test (tests/unit/test_load_profile_compose.py).
+module = ["prometheus_client.*", "asyncpg.*", "yaml", "yaml.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

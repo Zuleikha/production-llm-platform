@@ -3,7 +3,7 @@
 Read at the start of every session. Keep under ~150 lines. Facts only — rationale
 lives in `docs/adr/`.
 
-## Current state — **Stage 8 of 10 (Security), COMPLETE.** Version `0.1.0`
+## Current state — **Stage 9 of 10 (Reliability), COMPLETE.** Version `0.1.0`
 
 `POST /v1/chat/completions` runs a **real LangGraph agent loop against the Anthropic API**
 (`claude-opus-4-8`): reason → tool → observe → answer, bounded by `agent_max_steps`; usage summed.
@@ -16,10 +16,12 @@ judge opt-in, never CI (ADR 0017). **Stage 7:** `api` → **K8s via Helm** (`kin
 never applied** (ADR 0018). **Stage 8:** chat gated by **bearer API key** (salted-hash store,
 uniform 401); **Redis per-principal rate limit**, fail-open (429); input/excerpt/egress
 **guardrails** atop the ADR 0014 nonce fence (block only direct override/probe, else log);
-**gitleaks + pip-audit** CI gates (ADR 0019). `/health`/`/ready`/`/version`/`/metrics` stay unauth.
+**gitleaks + pip-audit** CI gates (ADR 0019); probe/scrape paths stay unauth. **Stage 9:** **circuit
+breaker** around `LLMClient` (→ **503**, never on a 400); **prompt caching** + deterministic **context
+windowing**; spanmetrics → **service map**; **Locust + chaos runbook** (opt-in, never CI); 2 SLO alerts (ADR 0020).
 
-Roadmap **`docs/PROJECT_STATUS.md`** (canonical). Detail `docs/stage-summaries/stage-0{1..8}.md`.
-Rationale **`docs/adr/`** 0001-0019; 0018 = K8s/Helm+Terraform, 0019 = auth/rate-limit/guardrails/CI-scan.
+Roadmap **`docs/PROJECT_STATUS.md`** (canonical). Detail `docs/stage-summaries/stage-0{1..9}.md`. Rationale
+**`docs/adr/`** 0001-0020 (0019 = auth/rate-limit/guardrails/CI-scan, 0020 = reliability breaker/caching/windowing/pools/metrics/SLOs).
 
 ## Layout
 
@@ -33,7 +35,7 @@ services/retrieval/  embeddings.py (seam) · store.py (Qdrant) · ingest.py · r
 services/monitoring/  tracing.py (build_tracer_provider seam · OTLP/Local providers) · base.py (SpanExporter=OTel's)
 services/evaluation/  metrics · dataset · retrieval (RetrievalEvaluator · InMemoryCosineStore) · baseline · judge
 services/security/  auth.py (ApiKeyAuthProvider · salted-hash store) · rate_limit.py (RedisRateLimiter, atomic Lua, fail-open) · guardrails.py (input/excerpt screens); wiring in api/security.py, egress check in retrieval/egress.py
-shared/  config · logging · observability (@traced) · datastores · migrations · version
+shared/  config · logging · observability (@traced) · resilience (circuit breaker) · metrics (x-cutting counters) · datastores · migrations · version
 data/corpus/  RAG corpus (scripts/ingest.py) · data/eval/  dataset.json + baseline.json (scripts/evaluate.py) · migrations/  NNNN_name.sql forward-only · tests/ mirrors source
 docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.md
 ```
@@ -49,14 +51,12 @@ docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.
   committed** — OS env only (a test enforces it). **`prod` requires all three datastore URLs +
   `ANTHROPIC_API_KEY` + `VOYAGE_API_KEY` + `API_KEYS` + `API_KEY_HASH_SECRET`**; `test` ignores root `.env`.
 - **Datastores:** `DatastoreRegistry.from_settings()` on `app.state.datastores`. No URL =
-  `not_configured`, never dialled. `startup()` concurrent and **never raises** — failures
-  surface on `/ready`, not a crash loop. `/health` must **never** probe (tripwire). Qdrant
-  uses `qdrant-client` (probe = `get_collections()`).
+  `not_configured`, never dialled. `startup()` concurrent and **never raises** — failures surface on
+  `/ready`, not a crash loop. `/health` must **never** probe (tripwire). Qdrant probe = `get_collections()`.
 - **Hermetic external-hop seams — read ADR 0009/0011/0016 first:** the `test` profile **cannot
   construct** `AnthropicClient`, `VoyageEmbeddingsClient`, *or* `OTLPTracerProvider` (each raises
   before its endpoint/key is read). Go via `build_llm_client`/`build_embeddings_client`/`build_tracer_provider`;
-  guard keys on the *profile*, not the key's absence. `test` gets a `LocalTracerProvider` (real spans,
-  never leave process); tracing is **not** a `prod` boot req — unset `OTEL_EXPORTER_OTLP_ENDPOINT` runs untraced, logs it (ADR 0005/0016).
+  guard keys on the *profile*, not the key's absence. `test` gets a `LocalTracerProvider`; tracing is **not** a `prod` boot req — unset `OTEL_EXPORTER_OTLP_ENDPOINT` runs untraced, logs it (ADR 0005/0016).
 - **No sampling params.** Opus 4.7+ **rejects `temperature`/`top_p`/`top_k` (400)**; `budget_tokens` gone
   (use `thinking={"type":"adaptive"}`). `max_tokens` **required**; `ChatCompletionRequest.temperature` kept for wire compat, **not forwarded**.
 - **Agent:** routes call the `CompletionEngine` on `app.state.engine`; `create_app(...,
@@ -72,10 +72,13 @@ docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.
   `principal:HMAC-SHA256(pepper,key)`. Rate limit Redis-atomic, **fail-open + log** (ADR 0008).
   Guardrails **log events, never the text**; block only direct override/probe on user input (400).
   gitleaks allowlist keys off the **fake-credential convention** (`not-a-real`/`wrong-key`/`test-raw-key-`), not paths — a real key still trips.
-- **Persistence:** Postgres is source of truth, Redis only caches. Writes **invalidate**
-  (Postgres first, then `DELETE`) — never rewrite. A Redis failure degrades to a Postgres
-  read: the **one** sanctioned exception to fail-loud (ADR 0008). Migrations are plain SQL,
-  forward-only, advisory-locked.
+- **Reliability (ADR 0020):** breaker = `shared/resilience.py` + `CircuitBreakingLLMClient` (wraps `LLMClient`,
+  wired in `app._build_engine`); trips on transport/5xx only (**never a 400**), threshold(5)+cooldown(30s). Prompt
+  caching + tool `cache_control` **inside `AnthropicClient.stream`**. `window_messages` windows the **outbound call
+  only** (state + persisted history untouched). Load/chaos **opt-in, never CI** (`tests/load/`, `docs/runbooks/`); alerts on `shared/metrics.py` counters.
+- **Persistence:** Postgres is source of truth, Redis only caches. Writes **invalidate** (Postgres
+  first, then `DELETE`) — never rewrite. A Redis failure degrades to a Postgres read: the **one**
+  sanctioned exception to fail-loud (ADR 0008). Migrations are plain SQL, forward-only, advisory-locked.
 - **Logging:** `get_logger(__name__)`; log **events** not sentences (`_logger.info("http.request",
   extra={...})`), one JSON object/line. Never log PII/secrets/tokens (nor queries/excerpts —
   attacker-influenced). **Tracing (ADR 0016):** `@traced` on new app functions → OTel span carrying
@@ -86,19 +89,18 @@ docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.
 - **Types:** mypy `strict`, everything annotated incl. tests. Narrow with `isinstance` not
   `# type: ignore`. Depend on narrow Protocols not concrete drivers. **Deps:** `==` pins,
   `uv.lock` committed, `--frozen` installs.
-- **Tests:** `tests/unit/`, mirror source. Test contracts, not internals. Write the failing
-  test first; never edit a test to make it pass. Switching profiles needs
-  `monkeypatch.setenv` **+** `get_settings.cache_clear()`. Opt-in layers skip by default:
-  `TEST_DATABASE_URL`/`TEST_REDIS_URL`, `TEST_QDRANT_URL`, `RUN_LIVE_CONTRACT_TESTS=1` + keys.
+- **Tests:** `tests/unit/`, mirror source. Test contracts, not internals. Write the failing test first;
+  never edit a test to make it pass. Switching profiles needs `monkeypatch.setenv` **+**
+  `get_settings.cache_clear()`. Opt-in layers skip by default (`TEST_DATABASE_URL`/`TEST_REDIS_URL`,
+  `TEST_QDRANT_URL`, `RUN_LIVE_CONTRACT_TESTS=1` + keys). `tests/load/` is **never** pytest-collected.
 - **Ending a stage:** `docs/contributing.md` → "Ending a stage" is **canonical** and lists **six**
   required updates — do all six before committing. **README is one** (it drifts silently).
 - **Container boot is required, not deferrable.** Before self-report, `docker build` + run in **both**
   `prod` and `test` profiles and curl the endpoints — green `pytest` ≠ a booting container (CI caught
   two failures a 2-min local boot catches).
 - **Architecture doc:** `docs/architecture.md` is source; `architecture.html` **generated** by
-  `scripts/build_architecture.py` — never edit it (a test fails on drift). Diagrams: pre-rendered
-  **SVG** in `docs/diagrams/`, no CDN/JS (ADR 0010); rendering needs Node/`npx`, build+`--check` only
-  Python. A Mermaid keyword (`graph`, `end`) as a node id fails the render.
+  `scripts/build_architecture.py` — never edit it (a test fails on drift). Diagrams: pre-rendered **SVG**
+  in `docs/diagrams/`, no CDN/JS (ADR 0010); rendering needs Node/`npx`, build+`--check` only Python. A Mermaid keyword (`graph`, `end`) as a node id fails the render.
 
 ## Run / test / lint
 
@@ -126,18 +128,16 @@ Bearer <key>`; `"stream": true` SSE; optional `conversation_id`; `citations`). G
   check `docker ps` for collisions. **Docker Desktop must be running** for live-datastore/Qdrant
   tests — `docker ps` is the real check, not `docker compose version`.
 - **`.git/index.lock` strands = two git actors racing the index, not a code bug.** A recurring
-  **0-byte** lock with **no `git.exe` alive** = a git process was hard-killed (`TerminateProcess`)
-  between creating and releasing it. Two racers here: the **CC harness's background `git status`
-  poll** and a **standalone Git Bash window open in the repo**. **Rule: one git actor at a time** —
-  stay off that Git Bash window while CC commits. Recovery: with **no `git.exe` running**, deleting
-  the 0-byte lock is safe. Separate from the Stage-7 Defender strand (`tmp_obj_*` + "Operation not
-  permitted", fixed by the folder exclusion) — different cause, can co-occur.
+  **0-byte** lock with **no `git.exe` alive** = a git process hard-killed between create and release.
+  Racers: the **CC harness `git status` poll** + a **standalone Git Bash window in the repo**. Rule:
+  **one git actor at a time**; with no `git.exe` running, deleting the 0-byte lock is safe. (Separate
+  from the Stage-7 Defender `tmp_obj_*` strand, fixed by the folder exclusion — can co-occur.)
 
 ## Deferred — do NOT build early
 
 | Stage | Deferred |
 |:--:|---|
-| 9 | Load/chaos testing, SLOs, **OTel metrics export** (traces-only shipped, ADR 0016), pool tuning, circuit breaking, prompt caching, context compaction · **10** Portfolio polish |
+| 9→still | **Per-conversation concurrency control** (ADR 0008 gap, not built), **LLM summarization** (windowing chosen instead), **Voyage circuit breaking** (only Anthropic wrapped) · **10** Portfolio polish |
 
 ## Known issues
 

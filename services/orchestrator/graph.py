@@ -60,6 +60,50 @@ SYSTEM_PROMPT = (
 )
 
 
+@traced
+def window_messages(messages: list[dict[str, Any]], window: int) -> list[dict[str, Any]]:
+    """Return the trailing slice of ``messages`` to send to the model (ADR 0020).
+
+    Deterministic message-count context compaction: when the list the model would
+    see exceeds ``window``, older turns are dropped from the *outbound call only*.
+    The full history stays in ``AgentState["messages"]`` and is exactly what gets
+    persisted — this windows what the model reads, never what is stored. A
+    summarization call was rejected (a second model call with its own cost and
+    failure mode); dropping older turns is honest — the context is gone, not
+    silently and lossily compressed.
+
+    The slice must be a *valid* request, not just the last N items. The API rejects
+    a ``tool_result`` whose matching ``tool_use`` block is absent, so the window is
+    trimmed forward to start on a genuine user turn — a ``{"role": "user",
+    "content": <str>}`` message, which is never a tool-result continuation and is
+    always a valid conversation start. If no such boundary exists within the last
+    ``window`` messages (a single very long tool loop), the full list is returned
+    rather than emit a broken request — correctness wins over the size cap.
+
+    Not decorated as a LangGraph node: this is a plain function ``_reason`` calls,
+    so ``@traced`` applies here where it cannot on the node itself (CLAUDE.md).
+    Reads only message roles and content *types*, never content text, so it leaks
+    nothing.
+    """
+    if len(messages) <= window:
+        return messages
+    for index in range(len(messages) - window, len(messages)):
+        message = messages[index]
+        if message.get("role") == "user" and isinstance(message.get("content"), str):
+            _logger.info(
+                "agent.context_windowed",
+                extra={"total": len(messages), "sent": len(messages) - index, "window": window},
+            )
+            return messages[index:]
+    # No clean boundary in range — keep the whole list rather than break tool
+    # pairing. Logged so a conversation that never compacts is visible, not silent.
+    _logger.info(
+        "agent.context_window_skipped",
+        extra={"total": len(messages), "window": window},
+    )
+    return messages
+
+
 def _accumulate_usage(left: TokenUsage, right: TokenUsage) -> TokenUsage:
     """Reducer: token usage sums across every turn of a run."""
     return left + right
@@ -151,12 +195,16 @@ class AgentGraph:
         max_steps: int = 6,
         max_tokens: int = 4096,
         system_prompt: str = SYSTEM_PROMPT,
+        context_window_messages: int = 40,
     ) -> None:
         self._llm = llm
         self._tools = tools or ToolRegistry.default()
         self._max_steps = max_steps
         self._max_tokens = max_tokens
         self._system_prompt = system_prompt
+        # Context compaction (ADR 0020): the model sees at most this many trailing
+        # messages; the full history is still carried in state and persisted.
+        self._context_window = context_window_messages
         self._specifications = self._tools.specifications()
         self._graph = self._build()
 
@@ -202,10 +250,13 @@ class AgentGraph:
         # both `complete` and `stream`.
         writer = get_stream_writer()
 
+        # Window the outbound call only — state["messages"] (and what gets
+        # persisted) is untouched. See window_messages / ADR 0020.
+        outbound = window_messages(state["messages"], self._context_window)
         turn: AssistantTurn | None = None
         async for event in self._llm.stream(
             system=self._system_prompt,
-            messages=state["messages"],
+            messages=outbound,
             tools=self._specifications,
             max_tokens=state["max_tokens"],
         ):
