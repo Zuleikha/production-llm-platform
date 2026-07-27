@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scripted demo walkthrough — production-llm-platform</title>
+<!-- GENERATED FILE - DO NOT EDIT. Source: docs/demo.md
+     Regenerate: uv run python scripts/build_docs.py
+     Pre-rendered from its markdown source (ADR 0010). No CDN, no JS. -->
+<style>
+:root {
+  --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --border: #d1d9e0;
+  --accent: #0969da; --code-bg: #f6f8fa; --quote-bg: #f6f8fa;
+  --table-stripe: #f6f8fa;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --border: #3d444d;
+    --accent: #4493f8; --code-bg: #151b23; --quote-bg: #151b23;
+    --table-stripe: #151b23;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 2rem 1rem 6rem; background: var(--bg); color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans",
+               Helvetica, Arial, sans-serif;
+  line-height: 1.6; font-size: 16px;
+}
+main { max-width: 980px; margin: 0 auto; }
+h1, h2, h3 { line-height: 1.25; margin-top: 2rem; margin-bottom: 1rem; font-weight: 600; }
+h1 { font-size: 2rem; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+h2 { font-size: 1.5rem; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+h3 { font-size: 1.25rem; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+  background: var(--code-bg); padding: .2em .4em; border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: .875em;
+}
+pre {
+  background: var(--code-bg); padding: 1rem; border-radius: 6px;
+  overflow-x: auto; max-width: 100%;
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1rem 0; padding: .75rem 1rem; border-left: .25em solid var(--border);
+  background: var(--quote-bg); color: var(--muted); border-radius: 0 6px 6px 0;
+}
+blockquote > :first-child { margin-top: 0; }
+blockquote > :last-child { margin-bottom: 0; }
+/* Wide tables scroll inside their own container so the page never does. */
+.table-scroll { overflow-x: auto; margin: 1rem 0; }
+table { border-collapse: collapse; width: 100%; }
+th, td {
+  border: 1px solid var(--border); padding: .5rem .75rem;
+  text-align: left; vertical-align: top;
+}
+th { background: var(--table-stripe); font-weight: 600; }
+tr:nth-child(2n) td { background: var(--table-stripe); }
+hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }
+/* Diagrams keep their natural size and scroll inside this box, so the page body
+   never scrolls sideways. The SVG is inlined — no script, no network. */
+.diagram {
+  margin: 1.5rem 0; padding: 1rem; overflow-x: auto;
+  border: 1px solid var(--border); border-radius: 6px; background: #ffffff;
+}
+.diagram svg { display: block; margin: 0 auto; height: auto; max-width: none; }
+/* The diagrams are rendered on a light canvas, so they keep a white plate in
+   dark mode rather than becoming unreadable dark-on-dark. */
+@media (prefers-color-scheme: dark) {
+  .diagram { background: #f6f8fa; }
+}
+.build-stamp {
+  margin: 0 auto 2rem; max-width: 980px; color: var(--muted); font-size: .8125rem;
+  border: 1px dashed var(--border); border-radius: 6px; padding: .5rem .75rem;
+}
+.build-stamp code { font-size: .8125em; }
+</style>
+</head>
+<body>
+<div class="build-stamp">
+  <strong>Generated file — do not edit.</strong>
+  Rendered from <code>docs/demo.md</code> by
+  <code>scripts/build_docs.py</code>. Built 2026-07-27.
+</div>
+<main>
+<h1>Scripted demo walkthrough</h1>
+<p>A repeatable end-to-end demonstration of the platform's externally-visible
+contract, run against the <strong>real running stack</strong> — not a mock, not paraphrased
+output.</p>
+<p><strong>Where it lives:</strong> <a href="../scripts/demo.sh"><code>scripts/demo.sh</code></a> — a single runnable
+script, chosen over a prose command list so a reviewer can <em>reproduce</em> it, not just
+read it. This page is its companion: the exact commands and the <strong>real captured
+output</strong> from one run.</p>
+<h2>Running it</h2>
+<p>Bring the cost-free <code>test</code>-profile stack up first (ADR 0020 Mode 1 — the scripted
+model echoes, so there is no model bill), then run the script:</p>
+<pre><code>docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build
+./scripts/demo.sh
+</code></pre>
+<blockquote>
+<p><strong>Capture note (this machine).</strong> The output below was captured from a container
+on the compose network (<code>http://api:8000</code>), not <code>http://localhost:8000</code>. On this
+project's Windows box, Docker Desktop's host port-forward intermittently returns
+empty replies (exit 52) while the container serves 200s internally — a documented
+environment quirk (see <code>CLAUDE.md</code>), not a code fault. <code>scripts/demo.sh</code> targets
+<code>localhost:8000</code> by default for a normal machine and honours a <code>DEMO_HOST</code>
+override (<code>DEMO_HOST=http://api:8000</code>) for the network-internal path used here.</p>
+</blockquote>
+<p>All output is from the <code>test</code> profile, so the model is the deterministic
+<code>ScriptedLLMClient</code> that echoes the last user turn (<code>&quot;You said: …&quot;</code>). That is what
+keeps the demo free and reproducible; the wire contract is identical to a real
+model call.</p>
+<hr />
+<h2>1. Authenticated chat — <code>200</code> + response shape</h2>
+<pre><code>curl -X POST http://api:8000/v1/chat/completions \
+  -H 'Authorization: Bearer test-key-not-a-real-secret' -H 'Content-Type: application/json' \
+  -d '{"model":"claude-opus-4-8","messages":[{"role":"user","content":"In one line, what is a readiness probe?"}],"max_tokens":64}'
+</code></pre>
+<pre><code>{"id":"chatcmpl-dea7b69f2b9b43ad8295da7492341545","object":"chat.completion","created":1785142949,"model":"claude-opus-4-8","choices":[{"index":0,"message":{"role":"assistant","content":"You said: In one line, what is a readiness probe?"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":10,"total_tokens":18},"citations":[]}
+</code></pre>
+<p><code>HTTP 200</code> — OpenAI-shaped <code>choices</code> / <code>usage</code>, plus the platform's top-level
+<code>citations</code> field (ADR 0013), here <code>[]</code> because this turn was not grounded.</p>
+<h2>2. Streaming (SSE) — <code>data:</code> frames + <code>[DONE]</code></h2>
+<pre><code>curl -N -X POST http://api:8000/v1/chat/completions \
+  -H 'Authorization: Bearer test-key-not-a-real-secret' -H 'Content-Type: application/json' \
+  -d '{"model":"claude-opus-4-8","messages":[{"role":"user","content":"Say hello in three words."}],"max_tokens":64,"stream":true}'
+</code></pre>
+<pre><code>data: {"id":"chatcmpl-a2c5c1262f974ee287a13aed2446b65d","object":"chat.completion.chunk","created":1785142954,"model":"claude-opus-4-8","choices":[{"index":0,"delta":{"role":"assistant","content":"You"}}]}
+
+data: {"id":"chatcmpl-a2c5c1262f974ee287a13aed2446b65d","object":"chat.completion.chunk","created":1785142954,"model":"claude-opus-4-8","choices":[{"index":0,"delta":{"content":" said:"}}]}
+
+data: {"id":"chatcmpl-a2c5c1262f974ee287a13aed2446b65d","object":"chat.completion.chunk","created":1785142954,"model":"claude-opus-4-8","choices":[{"index":0,"delta":{"content":" Say"}}]}
+
+... (one frame per token: " hello", " in", " three", " words.") ...
+
+data: {"id":"chatcmpl-a2c5c1262f974ee287a13aed2446b65d","object":"chat.completion.chunk","created":1785142954,"model":"claude-opus-4-8","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"citations":[]}
+
+data: [DONE]
+</code></pre>
+<p><code>text/event-stream</code>: a role-priming frame, one content delta per token, a final
+frame carrying <code>finish_reason</code> + <code>citations</code>, then the <code>data: [DONE]</code> sentinel
+(ADR 0004). Same graph as the non-streamed path — streaming is transport only.</p>
+<h2>3. <code>document_search</code> / citations — grounded turn</h2>
+<pre><code>curl -X POST http://api:8000/v1/chat/completions \
+  -H 'Authorization: Bearer test-key-not-a-real-secret' -H 'Content-Type: application/json' \
+  -d '{"model":"claude-opus-4-8","messages":[{"role":"user","content":"According to the platform documentation, what does the circuit breaker return when it trips?"}],"max_tokens":64}'
+</code></pre>
+<pre><code>{"id":"chatcmpl-2398b737660048969633186c9ffbfc29","object":"chat.completion","created":1785142959,"model":"claude-opus-4-8","choices":[{"index":0,"message":{"role":"assistant","content":"You said: According to the platform documentation, what does the circuit breaker return when it trips?"},"finish_reason":"stop"}],"usage":{"prompt_tokens":14,"completion_tokens":16,"total_tokens":30},"citations":[]}
+</code></pre>
+<p><code>HTTP 200</code>, <code>citations: []</code>. <strong>This is the honest limit of the cost-free profile:</strong>
+the <code>citations</code> field is always present, but the scripted model never emits a
+<code>tool_use</code> block, so no <code>document_search</code> runs and no source chunks are attached.
+A <strong>non-empty</strong> <code>citations</code> list requires a real model <em>and</em> an ingested corpus —
+both of which came together later in the session (the <code>.env</code> key was fixed and the
+corpus ingested). The <strong>real non-empty capture is in the dev-profile addendum</strong> at
+the end of this page. The grounding + citation mechanism is also proven hermetically
+by the retrieval and citation unit tests (ADR 0013/0014).</p>
+<h2>4. Unauthenticated call — the uniform <code>401</code></h2>
+<pre><code>curl -X POST http://api:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"claude-opus-4-8","messages":[{"role":"user","content":"ping"}],"max_tokens":16}'
+</code></pre>
+<pre><code>{
+    "error": {
+        "type": "http_error",
+        "message": "Missing or invalid credentials.",
+        "request_id": "88376b57549a4932b8702d8cfda72782"
+    }
+}
+</code></pre>
+<pre><code>HTTP 401
+</code></pre>
+<p>The uniform error envelope, pretty-printed by the script, followed by the status
+line (the script captures body and status separately so the <code>HTTP 401</code> line is not
+fed into the JSON parser). Missing / malformed / wrong keys all return this <strong>same</strong>
+shape — only the server log distinguishes why, so a client cannot probe the store
+(ADR 0019).</p>
+<h2>5. Rate limiting — a real <code>429</code></h2>
+<p>70 requests fired on one principal (<code>loaduser-7</code>) inside the 60 s window; the
+limiter is 60 requests / 60 s per principal:</p>
+<pre><code>status codes: 200 ×60, then 429 ×10
+200s: 60
+429s: 10
+</code></pre>
+<p>Exactly 60 <code>200</code>s then <code>429</code> for the rest — the per-principal Redis token bucket
+(atomic Lua <code>INCR</code>+<code>EXPIRE</code>) cutting in at the threshold (ADR 0019).</p>
+<h2>6. Circuit breaker — hermetic fault-injection fallback</h2>
+<p>The breaker wraps the <strong>real</strong> <code>AnthropicClient</code> only; under the <code>test</code> profile the
+scripted client never fails, so the breaker never opens here, and no cost-free live
+fault could be injected this session (there is no Anthropic base-URL override to
+point at a dead endpoint). As the Stage 9/10 prompts both allow, its contract is
+demonstrated hermetically instead:</p>
+<pre><code>uv run pytest tests/unit/test_resilience.py tests/unit/test_llm.py -q
+</code></pre>
+<pre><code>....................................                                     [100%]
+36 passed
+</code></pre>
+<p>These cover the generic <code>CircuitBreaker</code> state machine (opens on the Nth
+transport/5xx failure, <strong>never on a <code>400</code></strong>, half-open recovery after cooldown) and
+<code>CircuitBreakingLLMClient</code> rendering an open breaker as <code>503 provider_unavailable</code>
+(ADR 0020), driven by the <code>FaultInjectingLLMClient</code> double — the real client is
+never dialled, the same posture as ADR 0009.</p>
+<hr />
+<h2>What the demo shows, in one line each</h2>
+<div class="table-scroll"><table><thead>
+<tr>
+<th>#</th>
+<th>Concern</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Authenticated chat</td>
+<td><code>200</code>, OpenAI-shaped <code>choices</code>/<code>usage</code> + <code>citations</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>SSE streaming</td>
+<td><code>data:</code> frames per token + <code>[DONE]</code> (ADR 0004)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Grounding / citations</td>
+<td>non-empty typed <code>citations</code> captured for real (addendum) — model grounded its answer in <code>incident-response.md</code>, ADR 0013</td>
+</tr>
+<tr>
+<td>4</td>
+<td>AuthN</td>
+<td>one uniform <code>401</code> for missing/malformed/wrong (ADR 0019)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Rate limiting</td>
+<td>60 <code>200</code> then <code>429</code>, per principal (ADR 0019)</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Circuit breaker</td>
+<td><code>503 provider_unavailable</code> contract, proven hermetically (ADR 0020)</td>
+</tr>
+</tbody>
+</table></div><hr />
+<h2>Addendum — real dev-profile captures (Anthropic key fixed, 2026-07-27)</h2>
+<p>The cost-free walkthrough above is the reproducible, no-bill artifact (scripted
+echo model). After it was captured, the operator fixed the malformed <code>.env</code>
+<code>ANTHROPIC_API_KEY</code>, so the model-dependent steps were <strong>re-captured for real</strong>
+against a <code>dev</code>-profile stack (<code>ENVIRONMENT=dev</code>, real <code>claude-opus-4-8</code>; auth key
+overridden to the fixed test principal so the same bearer works). These are <strong>real
+Anthropic calls</strong>, not echoes — note the substantive answers and the real token
+counts (the ~1.1k prompt tokens are the system prompt + tool specs).</p>
+<p><strong>Real authenticated chat (<code>200</code>):</strong></p>
+<pre><code>{"id":"chatcmpl-cd4e0c9603704155a610a96cc2ae3ac0","object":"chat.completion","model":"claude-opus-4-8","choices":[{"index":0,"message":{"role":"assistant","content":"A readiness probe in Kubernetes is a periodic health check that determines whether a pod's container is ready to accept traffic, and if it fails, the pod is temporarily removed from the Service's load-balancing endpoints (without being restarted) until it passes again."},"finish_reason":"stop"}],"usage":{"prompt_tokens":1104,"completion_tokens":85,"total_tokens":1189},"citations":[]}
+</code></pre>
+<p><strong>Real streaming (SSE, one frame shortened):</strong></p>
+<pre><code>data: {…"delta":{"role":"assistant","content":"Circ"}}
+data: {…"delta":{"content":"uit breaker, retry with backoff, bulkhead"}}
+data: {…"delta":{},"finish_reason":"stop"},…"citations":[]}
+data: [DONE]
+</code></pre>
+<p><strong>Real grounding / citations (step 3) — non-empty, captured.</strong> After the operator
+authorised it, the corpus was ingested (<code>scripts/ingest.py</code> → 4 chunks embedded via
+real Voyage <code>voyage-3.5-lite</code>, 1685 tokens, into the <code>documents</code> collection). A real
+grounded call then made the model call <code>document_search</code> and answer from the fenced
+excerpts, returning a <strong>non-empty typed <code>citations</code> array</strong> (ADR 0013):</p>
+<pre><code>POST /v1/chat/completions
+{"messages":[{"role":"user","content":"According to the documentation, what are the
+ key steps in the incident response process?"}],"max_tokens":512}
+</code></pre>
+<pre><code>HTTP 200 · usage: prompt_tokens 5110 · completion_tokens 587 · total 5697
+
+message: "According to the incident response documentation (`incident-response.md:0`),
+ the key steps are: 1. Classify the severity … 2. Run the incident (one incident
+ commander who does not debug; mitigate before diagnosing; record as you go) …
+ 3. Review afterwards (blameless, within five working days; every action gets an
+ owner and a date). … only `incident-response.md` describes the incident response
+ process itself."
+
+citations: [
+  {"id":"incident-response.md:0","source":"incident-response.md","score":0.650, "text":"# Incident response … Severity is set by customer impact …"},
+  {"id":"observability.md:0",     "source":"observability.md",     "score":0.484, "text":"# Observability … The three signals …"},
+  {"id":"deployments.md:0",       "source":"deployments.md",       "score":0.367, "text":"# Deployments and rollback … blue/green cutover …"},
+  {"id":"code-review.md:0",       "source":"code-review.md",       "score":0.351, "text":"# Code review … What review is for …"}
+]
+</code></pre>
+<p>Each citation is <strong>typed provenance carried out of the tool</strong> — <code>id</code>, <code>source</code>,
+<code>score</code>, and the retrieved <code>text</code> — never parsed back out of the model's answer, so
+a document cannot forge its own citation (ADR 0013). The model grounded its answer
+in the top hit and even noted the lower-scored documents were off-topic. (Text
+bodies abbreviated here for readability; the corpus is the committed, non-sensitive
+<code>data/corpus/</code> ops docs.)</p>
+
+</main>
+</body>
+</html>

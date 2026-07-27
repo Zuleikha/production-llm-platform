@@ -11,15 +11,15 @@
 > pre-rendered to inline SVG under `docs/diagrams/` — the page has no CDN and no
 > JavaScript, and renders offline (ADR 0010).
 
-**Stage 5 of 10 (Observability).** The platform is a FastAPI service whose chat
-endpoint runs a **real LangGraph agent loop against the Anthropic API**: it
-reasons, calls tools, observes the results, and answers — persisting the
-conversation to Postgres behind a Redis read-through cache, and reporting the
-model's own token counts. Stage 4 grounds those answers in documents: a corpus is
-chunked and embedded (Voyage AI) into **Qdrant**, a `document_search` tool
-retrieves relevant passages, and the response carries **citations** back to the
-source chunks — retrieval is one more `Tool`, and the routes, SSE framing and
-`CompletionEngine`/`LLMClient` seams are untouched.
+**Stage 10 of 10 — the platform is feature-complete.** The platform is a FastAPI
+service whose chat endpoint runs a **real LangGraph agent loop against the
+Anthropic API**: it reasons, calls tools, observes the results, and answers —
+persisting the conversation to Postgres behind a Redis read-through cache, and
+reporting the model's own token counts. Stage 4 grounds those answers in
+documents: a corpus is chunked and embedded (Voyage AI) into **Qdrant**, a
+`document_search` tool retrieves relevant passages, and the response carries
+**citations** back to the source chunks — retrieval is one more `Tool`, and the
+routes, SSE framing and `CompletionEngine`/`LLMClient` seams are untouched.
 
 **Stage 5 gives the `@traced` seam a real backend.** Since Stage 1 every
 application function has carried `@traced`, logging enter/exit/error. It now also
@@ -36,9 +36,21 @@ is unchanged, which is what let the Stage 3 swap happen without redesigning the
 endpoint, let Stage 4 add grounding without touching it, and let Stage 5 add
 tracing without touching any of it.
 
+**Stages 6–9 hardened it for production, none of them re-cutting a seam.** Stage 6
+added a two-tier RAG evaluation harness whose hermetic recall@k/MRR tier is a CI
+regression gate (ADR 0017). Stage 7 packaged the service as a **Helm chart**
+deployed to Kubernetes, verified end-to-end on a real `kind` cluster, with AWS
+Terraform **validated but never applied** (ADR 0018). Stage 8 **authenticated** the
+chat endpoint (bearer API key, per-principal rate limiting, RAG guardrails) and
+added gitleaks + pip-audit CI gates (ADR 0019). Stage 9 made it **survive load and
+partial failure**: a circuit breaker around the model call, prompt caching,
+deterministic context windowing, an OTel spanmetrics pipeline behind Tempo's
+service map, and two SLO alerts (ADR 0020). **Stage 10 is portfolio polish — docs,
+a scripted demo and a case study, no new platform capability.**
+
 ---
 
-## Current state (Stage 9 — built and verified)
+## Current state (final — built and verified through Stage 9)
 
 ### Component map
 
@@ -129,6 +141,46 @@ All three datastores now **hold real data**: Postgres the conversation history,
 Redis its cache, and — new in Stage 4 — Qdrant the document vectors. The Stage 2
 raw-`httpx` `/readyz` probe is gone; Qdrant is reached through `qdrant-client`,
 and its readiness probe is now `get_collections()` (ADR 0012).
+
+### Request lifecycle — the cross-cutting production gates
+
+The component map above is the *topology*; this is the **single whole-system view
+of one chat request** as it passes every production concern the later stages added
+— authentication (Stage 8), rate limiting (Stage 8), the input guardrail (Stage 8)
+and the model circuit breaker (Stage 9) — with the distinct status code each gate
+returns. Every gate is a decorator on the one request path already shown, not a new
+subsystem; this diagram is where they line up in order.
+
+```mermaid
+flowchart TD
+    client([HTTP client]) --> rid["RequestContextMiddleware<br/>request-id · metrics · access log"]
+    rid --> auth{"bearer key valid?<br/><i>constant-time hash compare</i>"}
+    auth -->|no| e401["401 · uniform envelope<br/><i>missing / malformed / wrong</i>"]
+    auth -->|yes| rl{"under per-principal<br/>rate limit?"}
+    rl -->|"Redis down"| failopen["fail-open + log<br/>ratelimit.degraded"]
+    rl -->|over limit| e429["429 · too many requests"]
+    rl -->|yes| guard{"input guardrail:<br/>override / probe?"}
+    failopen --> guard
+    guard -->|"direct override"| e400["400 · blocked"]
+    guard -->|ok| engine["CompletionEngine → agent loop"]
+    engine --> breaker{"circuit breaker<br/>(Anthropic)"}
+    breaker -->|open| e503["503 · provider_unavailable"]
+    breaker -->|closed| llm(["Anthropic API"])
+    engine -.->|"document_search"| retr["retrieval → nonce-fence<br/>+ egress check"]
+
+    classDef bad fill:#ffe9e9,stroke:#d95a5a,color:#7a0000
+    classDef good fill:#e9f7ec,stroke:#4caf7d,color:#0a4a2a
+    classDef ext fill:#ede7ff,stroke:#7b5cd6,color:#2c1a66
+    classDef node fill:#e8f4ff,stroke:#4a90d9,color:#0a3d62
+    class e401,e429,e400,e503 bad
+    class llm ext
+    class engine,retr node
+    class failopen good
+```
+
+The health/readiness/version/metrics endpoints deliberately skip auth and rate
+limiting (probe and scrape paths, ADR 0018/0019); only `POST /v1/chat/completions`
+runs the full gauntlet above.
 
 ### The `api` service
 
@@ -596,26 +648,26 @@ real call to each provider when a human runs it deliberately.
 
 ---
 
-## Planned — not yet implemented
+## Planned — nothing left to build
 
-Each item below is a **contract or empty folder only** today. The owning stage
-builds it.
+All ten stages are complete. There is **no unimplemented platform component**: the
+roadmap's last stage (10 — Portfolio) is documentation, a scripted demo and a case
+study, adding no runtime capability. What follows is the standing list of
+**deliberate non-goals** — things intentionally *not* built, each tied to a
+decision that would have to change first.
 
-| Component | Stage | Status today |
-|-----------|-------|--------------|
-| Portfolio — final polish, docs, demos, case-study writeup | 10 | **Not started.** |
-
-### Deliberate non-goals as of Stage 9
+### Deliberate non-goals as of Stage 10 (final)
 
 **Authentication is now API-key only** (Stage 8, ADR 0019): no JWT, no OAuth, no
 external IdP, no key rotation/expiry beyond editing `API_KEYS` and restarting, and
 single-tier authZ (no admin/ops split). The heuristic guardrails are evadable
 signal, not a boundary, and the rate limiter fails open on a Redis outage.
-**Metrics are not exported through the OTel collector** — the
-collector carries traces only, and metrics stay on Prometheus scraping `/metrics`
-(a deliberate scope cut, ADR 0016), so Grafana's service-map and node-graph views
-are switched off rather than left rendering "No data"; building that metrics-from-
-traces pipeline is deferred to Stage 9, which owns SLOs and actually needs it.
+**The app's own request metrics stay on Prometheus** scraping `/metrics` (ADR 0016
+unchanged) rather than being exported through the OTel collector — but Stage 9 did
+build the **metrics-from-traces pipeline** that was deferred here: a
+spanmetrics/servicegraph connector on the collector derives RED metrics from spans
+into Prometheus, which is what now drives Tempo's **service map / node graph** (ADR
+0020). The two metric sources are additive, not a copy of each other.
 Evaluation covers **RAG retrieval only** (ADR 0017) — not agent tool-use or
 open-ended chat quality, which have no fixture corpus to grade against. Pagination
 conventions are still deferred — no endpoint returns a collection yet.

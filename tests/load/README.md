@@ -40,9 +40,17 @@ uv run --with locust locust \
 > **Every `docker compose` command for Mode 1 needs both `-f` files** — e.g.
 > `docker compose -f docker-compose.yml -f docker-compose.test.yml logs -f api`.
 
+- Each simulated `ChatUser` authenticates as one of **20 distinct principals**
+  (`loaduser-0` … `loaduser-19`, committed in `test.env`), so load spreads across
+  20 rate-limit buckets instead of colliding on one; a stateful subset carries a
+  stable `conversation_id` so the Postgres cache path is exercised too (Stage 10
+  fix, ADR 0020 addendum 3). Note the ceiling: Mode 1's scripted model never
+  tool-calls, so `document_search` / Qdrant's *query* pool needs Mode 2.
 - `--users` is the concurrency knob to sweep for pool tuning (try 25 / 50 / 100
   and watch where a pool queues or times out — record the level in the stage
-  summary and set the default in `shared/config.py` from it).
+  summary and set the default in `shared/config.py` from it). The Stage 10 run
+  (60 users) saw zero pool timeouts and a sub-150 ms chat p99, confirming the
+  current 10/10/10 defaults — see ADR 0020 addendum 3.
 - Open Grafana at <http://localhost:3001> during the run to watch the RED panels
   and (Stage 9) the Tempo service map / node graph now that spanmetrics back them.
 

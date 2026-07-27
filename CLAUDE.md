@@ -3,7 +3,7 @@
 Read at the start of every session. Keep under ~150 lines. Facts only — rationale
 lives in `docs/adr/`.
 
-## Current state — **Stage 9 of 10 (Reliability), COMPLETE.** Version `0.1.0`
+## Current state — **Stage 10 of 10 (Portfolio), COMPLETE — all stages done.** Version `0.1.0`
 
 `POST /v1/chat/completions` runs a **real LangGraph agent loop against the Anthropic API**
 (`claude-opus-4-8`): reason → tool → observe → answer, bounded by `agent_max_steps`; usage summed.
@@ -19,9 +19,11 @@ uniform 401); **Redis per-principal rate limit**, fail-open (429); input/excerpt
 **gitleaks + pip-audit** CI gates (ADR 0019); probe/scrape paths stay unauth. **Stage 9:** **circuit
 breaker** around `LLMClient` (→ **503**, never on a 400); **prompt caching** + deterministic **context
 windowing**; spanmetrics → **service map**; **Locust + chaos runbook** (opt-in, never CI); 2 SLO alerts (ADR 0020).
+**Stage 10 (portfolio, no new capability):** housekeeping (ADR-0020 index row; `pyyaml` explicit dep; Locust fixed → 20
+principals + conv-id, pools 10/10/10 **confirmed**, ADR 0020 add. 3); `docs/demo.md`+`scripts/demo.sh`, `docs/case-study.md` (both → styled `.html` via shared `scripts/doc_render.py`); whole-system request-lifecycle diagram.
 
-Roadmap **`docs/PROJECT_STATUS.md`** (canonical). Detail `docs/stage-summaries/stage-0{1..9}.md`. Rationale
-**`docs/adr/`** 0001-0020 (0019 = auth/rate-limit/guardrails/CI-scan, 0020 = reliability breaker/caching/windowing/pools/metrics/SLOs).
+Roadmap **`docs/PROJECT_STATUS.md`** (canonical). Detail `docs/stage-summaries/stage-{01..10}.md`. Rationale **`docs/adr/`**
+0001-0020 (0019 = auth/rate-limit/guardrails/CI-scan; 0020 = reliability breaker/caching/windowing/pools/metrics/SLOs, add. 3 = Locust fix).
 
 ## Layout
 
@@ -30,14 +32,12 @@ services/api/    app.py · routes/{health,meta,chat} · schemas.py
                  completions.py = CompletionEngine seam + OrchestratorEngine
 services/agents/ base.py (Agent · ToolAgent) · tools.py (registry, 3 offline tools)
 services/orchestrator/  base.py · graph.py (LangGraph) · llm.py (LLMClient) · conversations.py
-services/retrieval/  embeddings.py (seam) · store.py (Qdrant) · ingest.py · retriever.py ·
-                 tool.py (document_search — injection boundary)
+services/retrieval/  embeddings.py (seam) · store.py (Qdrant) · ingest.py · retriever.py · tool.py (document_search — injection boundary)
 services/monitoring/  tracing.py (build_tracer_provider seam · OTLP/Local providers) · base.py (SpanExporter=OTel's)
 services/evaluation/  metrics · dataset · retrieval (RetrievalEvaluator · InMemoryCosineStore) · baseline · judge
 services/security/  auth.py (ApiKeyAuthProvider · salted-hash store) · rate_limit.py (RedisRateLimiter, atomic Lua, fail-open) · guardrails.py (input/excerpt screens); wiring in api/security.py, egress check in retrieval/egress.py
 shared/  config · logging · observability (@traced) · resilience (circuit breaker) · metrics (x-cutting counters) · datastores · migrations · version
-data/corpus/  RAG corpus (scripts/ingest.py) · data/eval/  dataset.json + baseline.json (scripts/evaluate.py) · migrations/  NNNN_name.sql forward-only · tests/ mirrors source
-docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.md
+data/corpus/  RAG corpus (ingest.py) · data/eval/  dataset+baseline (evaluate.py) · migrations/  forward-only SQL · tests/ mirrors source · docs/diagrams/ GENERATED SVG · {architecture,case-study,demo}.html GENERATED (build_architecture.py/build_docs.py)
 ```
 
 ## Conventions
@@ -98,9 +98,10 @@ docs/diagrams/   GENERATED SVG · architecture.html GENERATED from architecture.
 - **Container boot is required, not deferrable.** Before self-report, `docker build` + run in **both**
   `prod` and `test` profiles and curl the endpoints — green `pytest` ≠ a booting container (CI caught
   two failures a 2-min local boot catches).
-- **Architecture doc:** `docs/architecture.md` is source; `architecture.html` **generated** by
-  `scripts/build_architecture.py` — never edit it (a test fails on drift). Diagrams: pre-rendered **SVG**
-  in `docs/diagrams/`, no CDN/JS (ADR 0010); rendering needs Node/`npx`, build+`--check` only Python. A Mermaid keyword (`graph`, `end`) as a node id fails the render.
+- **Generated doc pages (never hand-edit; `--check` tests fail on drift):** `architecture.html` ← `docs/architecture.md`
+  via `scripts/build_architecture.py`; `case-study.html`/`demo.html` ← `docs/{case-study,demo}.md` via `scripts/build_docs.py`.
+  Shared CSS/shell/markdown render in `scripts/doc_render.py` (one style source, ADR 0010, no CDN/JS). Diagrams: pre-rendered
+  **SVG** in `docs/diagrams/`; rendering needs Node/`npx`, build+`--check` only Python. Mermaid keyword (`graph`,`end`) as a node id fails the render.
 
 ## Run / test / lint
 
@@ -117,16 +118,14 @@ Bearer <key>`; `"stream": true` SSE; optional `conversation_id`; `citations`). G
 
 ## Known environment quirks — this machine, not the code
 
-- **Cross-drive uv / lock-install mismatch.** uv cache on `C:`, repo on `D:`. uv's default hardlink
-  mode fails across drives **silently** — package stays in `uv.lock`, never lands in the venv
-  (baffling `ModuleNotFoundError`). Fixed repo-wide by `link-mode = "copy"` under `[tool.uv]` — do
-  not remove; if a locked package won't import, diff `uv pip list` vs `uv.lock`. `sniffio` is a direct dep from this.
-- **Never use the system Python at `D:\Python\Python312`.** Stripped build: a venv from it
-  **segfaults on `import ctypes`** (surfaces as an access violation importing `httpx`). Use
-  `uv python install 3.12 && uv venv --managed-python --python 3.12`; runs CPython **3.12.13**.
-- **Grafana port 3000 conflicts with `open-webui`.** Remapped to **3001** in `docker-compose.yml`;
-  check `docker ps` for collisions. **Docker Desktop must be running** for live-datastore/Qdrant
-  tests — `docker ps` is the real check, not `docker compose version`.
+- **Cross-drive uv / lock-install mismatch.** uv cache on `C:`, repo on `D:`; default hardlink mode fails across
+  drives **silently** (package stays in `uv.lock`, never lands in venv → baffling `ModuleNotFoundError`). Fixed by
+  `link-mode = "copy"` under `[tool.uv]` — do not remove; if a locked pkg won't import diff `uv pip list` vs `uv.lock`. `sniffio`/`pyyaml` are direct deps from this.
+- **Never use the system Python at `D:\Python\Python312`.** Stripped build: a venv from it **segfaults on `import
+  ctypes`** (access violation importing `httpx`). Use `uv python install 3.12 && uv venv --managed-python --python 3.12` (CPython **3.12.13**).
+- **Grafana port 3000 conflicts with `open-webui`** → remapped to **3001**. **Docker Desktop must be running** for
+  live/Qdrant tests (`docker ps` is the real check). **Docker Desktop host port-forward is flaky** here — `curl localhost:8000`
+  can return empty replies (exit 52) while the container serves 200s; run demo/Locust from a peer container on the compose network.
 - **`.git/index.lock` strands = two git actors racing the index, not a code bug.** A recurring
   **0-byte** lock with **no `git.exe` alive** = a git process hard-killed between create and release.
   Racers: the **CC harness `git status` poll** + a **standalone Git Bash window in the repo**. Rule:
@@ -135,16 +134,16 @@ Bearer <key>`; `"stream": true` SSE; optional `conversation_id`; `citations`). G
 
 ## Deferred — do NOT build early
 
-| Stage | Deferred |
-|:--:|---|
-| 9→still | **Per-conversation concurrency control** (ADR 0008 gap, not built), **LLM summarization** (windowing chosen instead), **Voyage circuit breaking** (only Anthropic wrapped) · **10** Portfolio polish |
+Still deferred by decision: **per-conversation concurrency control** (ADR 0008 gap, not built),
+**LLM summarization** (windowing chosen instead), **Voyage circuit breaking** (only Anthropic wrapped).
 
 ## Known issues
 
 - 422 stringifies Pydantic's raw error list into `message`. A datastore failing `connect` at boot
   stays `unavailable` until restart. **`/ready` does not check schema version** — a failed migration
-  leaves the service reporting ready while every chat query fails (ADR 0007).
-- **No per-conversation concurrency control** — two concurrent turns on one `conversation_id`
-  collide on `(conversation_id, position)`; the second fails loudly, not serialised (ADR 0008).
-- **Editing a doc shorter orphans its tail chunks** in Qdrant — ingestion is upsert-only (ADR 0012).
+  leaves the service reporting ready while every chat query fails (ADR 0007). **`request_id: null` on the
+  Postgres-down 500** (chaos scenario 1) — pre-existing, accepted/deferred (Stage 10, see case-study).
+- **No per-conversation concurrency control** (ADR 0008; also in Deferred above): two concurrent turns on
+  one `conversation_id` collide on `(conversation_id, position)`, second fails loudly. **Editing a doc
+  shorter orphans its tail chunks** in Qdrant — ingestion is upsert-only (ADR 0012).
 - **Hermetic suite can't catch a wrong belief about the real APIs** — run the opt-in live contract test (ADR 0015) when changing `llm.py`/`embeddings.py`.

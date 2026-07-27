@@ -6,13 +6,13 @@ Every stage prompt references this file. Update it at the end of each stage.
 | | |
 |---|---|
 | **Current version** | `0.1.0` |
-| **Current stage** | Stage 9 — Reliability (**complete**) |
-| **Overall progress** | **9 / 10 stages — 90%** |
-| **Next milestone** | Stage 10 — Portfolio |
-| **Last updated** | 2026-07-24 |
+| **Current stage** | Stage 10 — Portfolio (**complete**) |
+| **Overall progress** | **10 / 10 stages — 100%** |
+| **Next milestone** | — all stages complete |
+| **Last updated** | 2026-07-27 |
 
 ```
-Progress  [█████████─]  9/10
+Progress  [██████████]  10/10 — complete
 ```
 
 ---
@@ -88,12 +88,11 @@ HTML — `tests/unit/test_architecture.py` fails when the two disagree.
 | 7 | Kubernetes | [stage-07-kubernetes.md](stage-summaries/stage-07-kubernetes.md) | [stage-07-kubernetes.md](verification-log/stage-07-kubernetes.md) | 2026-07-21 |
 | 8 | Security | [stage-08-security.md](stage-summaries/stage-08-security.md) | [stage-08-security.md](verification-log/stage-08-security.md) | 2026-07-23 |
 | 9 | Reliability | [stage-09-reliability.md](stage-summaries/stage-09-reliability.md) | [stage-09-reliability.md](verification-log/stage-09-reliability.md) | 2026-07-24 |
+| 10 | Portfolio | [stage-10-portfolio.md](stage-summaries/stage-10-portfolio.md) | [stage-10-portfolio.md](verification-log/stage-10-portfolio.md) | 2026-07-27 |
 
 ## Remaining stages
 
-| Stage | Name | Summary file (fixed) | Objective |
-|:-----:|------|----------------------|-----------|
-| 10 | Portfolio | `stage-10-portfolio.md` | Final polish, docs, demos, case study writeup |
+None — all ten stages are complete.
 
 ---
 
@@ -253,10 +252,24 @@ no endpoint returns a collection yet. Revisit when one does.
 
 ---
 
-## Next milestone — Stage 10 (Portfolio)
+## Stage 10 (Portfolio) — complete
 
-**Objective:** final polish, docs, demos, and a case-study writeup. No new platform
-capability — this stage packages what stages 1–9 built.
+**Objective delivered:** final polish, docs, a scripted demo, and a case-study
+writeup. **No new platform capability** — this stage packaged what stages 1–9 built
+and closed the last housekeeping items. Specifically: the missing ADR 0020 row in
+the ADR index; `pyyaml` promoted from a transitive to an explicit dependency (the
+`sniffio` class of latent risk); the Locust harness fixed to mint 20 distinct
+principals + a stateful `conversation_id` subset so a real load run produced actual
+pool-tuning numbers (ADR 0020 addendum 3 — the 10/10/10 pool defaults were
+**confirmed**, zero pool timeouts at 60 users); a scripted demo (`docs/demo.md` via
+`scripts/demo.sh`) with real captured output; a case-study writeup
+(`docs/case-study.md`); and a final architecture-doc pass (a new whole-system
+request-lifecycle diagram; corrected the stale "OTel metrics pipeline deferred to
+Stage 9" note that Stage 9 had actually resolved).
+
+**Known limitation carried into the final state (stated, not dropped):** the
+`request_id: null` on the Postgres-down `500` (chaos-runbook scenario 1) remains an
+accepted, deferred item — see `docs/case-study.md`.
 
 **Resolved in Stage 9 (Reliability, ADR 0020):** the reliability surfaces are
 closed. A **circuit breaker** wraps the Anthropic `LLMClient` (opens on

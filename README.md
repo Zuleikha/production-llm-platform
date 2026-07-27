@@ -3,7 +3,16 @@
 A production-grade LLM platform, built in **10 deliberate stages** — each stage
 adding one layer of real production concern, documented as it goes.
 
-> ### 🚧 Stage 9 of 10 complete — Reliability
+> ### 🚧 Stage 10 of 10 built — pending independent verification
+>
+> All ten stages are built. Stages 1–9 are independently verified; Stage 10
+> (Portfolio) is complete and self-reported, pending its own independent
+> verification. Stage 10 adds
+> **no new platform capability** — it packages the build for review: a scripted
+> demo with real captured output ([docs/demo.md](docs/demo.md), run via
+> [`scripts/demo.sh`](scripts/demo.sh)), a case-study writeup told through the
+> decision trail ([docs/case-study.md](docs/case-study.md)), and a final
+> docs/diagram pass. The description below is the full feature set, Stages 1–9.
 >
 > **What exists today:** a FastAPI service whose chat endpoint runs a real
 > **LangGraph agent loop against the Anthropic API** — it reasons, calls tools,
@@ -141,7 +150,8 @@ uv run pytest -v            # tests only
 ## Repository structure
 
 ```
-docs/              architecture, ADRs, runbooks, stage summaries, prompts, diagrams
+docs/              architecture, ADRs, runbooks, stage summaries, prompts, diagrams,
+                   case-study.md · demo.md (Stage 10)
 services/
   api/             ✅ HTTP surface — routes, schemas, the CompletionEngine seam
   agents/          ✅ Agent · ToolAgent · ToolRegistry (Stage 3)
@@ -161,7 +171,8 @@ tests/             ✅ unit tests mirroring the source tree
 tests/load/        ✅ opt-in Locust harness, never CI — pool tuning + chaos load (Stage 9)
 examples/          runnable examples
 infrastructure/    docker/ ✅   kubernetes/ ✅ Helm chart, kind-verified (Stage 7)   terraform/ ✅ AWS, validated-never-applied (Stage 7)
-scripts/           helper scripts — ingest.py (costs $ outside test) · evaluate.py (RAG eval gate)
+scripts/           helper scripts — ingest.py (costs $ outside test) · evaluate.py (RAG eval gate) ·
+                   demo.sh (scripted end-to-end demo, Stage 10) · generate_api_key.py
 .github/workflows/ CI
 ```
 
@@ -182,8 +193,8 @@ Each stage ends with a summary document at a **fixed** filename:
 | 6 | MLOps | [`stage-06-mlops.md`](docs/stage-summaries/stage-06-mlops.md) | [log](docs/verification-log/stage-06-mlops.md) | ✅ complete |
 | 7 | Kubernetes | [`stage-07-kubernetes.md`](docs/stage-summaries/stage-07-kubernetes.md) | [log](docs/verification-log/stage-07-kubernetes.md) | ✅ complete |
 | 8 | Security | [`stage-08-security.md`](docs/stage-summaries/stage-08-security.md) | [log](docs/verification-log/stage-08-security.md) | ✅ complete |
-| 9 | Reliability | [`stage-09-reliability.md`](docs/stage-summaries/stage-09-reliability.md) | [log](docs/verification-log/stage-09-reliability.md) | ✅ **current — complete** |
-| 10 | Portfolio | `stage-10-portfolio.md` | — | ⬜ next |
+| 9 | Reliability | [`stage-09-reliability.md`](docs/stage-summaries/stage-09-reliability.md) | [log](docs/verification-log/stage-09-reliability.md) | ✅ complete |
+| 10 | Portfolio | [`stage-10-portfolio.md`](docs/stage-summaries/stage-10-portfolio.md) | pending | ⏳ **built, pending independent verification** |
 
 Live progress: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
 
@@ -191,6 +202,8 @@ Live progress: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
 
 | Doc | What it's for |
 |-----|---------------|
+| [case-study.md](docs/case-study.md) | The build, told through the decision trail — for a reviewer |
+| [demo.md](docs/demo.md) | Scripted end-to-end demo with real captured output |
 | [architecture.md](docs/architecture.md) | Current state vs planned |
 | [development.md](docs/development.md) | Setup, running, troubleshooting |
 | [contributing.md](docs/contributing.md) | Workflow, branches, PRs |

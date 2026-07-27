@@ -38,6 +38,7 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
+import doc_render  # sibling module in scripts/ (mypy_path); shared page styling.
 from markdown_it import MarkdownIt
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -60,103 +61,13 @@ _MERMAID_CLI = "@mermaid-js/mermaid-cli@11.4.2"
 # and any historical snapshot driven through the same functions.
 _MERMAID_CONFIG = _REPO_ROOT / "scripts" / "mermaid-config.json"
 
-_GENERATED_BANNER = "GENERATED FILE - DO NOT EDIT"
-
-_CSS = """
-:root {
-  --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --border: #d1d9e0;
-  --accent: #0969da; --code-bg: #f6f8fa; --quote-bg: #f6f8fa;
-  --table-stripe: #f6f8fa;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --border: #3d444d;
-    --accent: #4493f8; --code-bg: #151b23; --quote-bg: #151b23;
-    --table-stripe: #151b23;
-  }
-}
-* { box-sizing: border-box; }
-body {
-  margin: 0; padding: 2rem 1rem 6rem; background: var(--bg); color: var(--fg);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans",
-               Helvetica, Arial, sans-serif;
-  line-height: 1.6; font-size: 16px;
-}
-main { max-width: 980px; margin: 0 auto; }
-h1, h2, h3 { line-height: 1.25; margin-top: 2rem; margin-bottom: 1rem; font-weight: 600; }
-h1 { font-size: 2rem; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
-h2 { font-size: 1.5rem; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
-h3 { font-size: 1.25rem; }
-a { color: var(--accent); text-decoration: none; }
-a:hover { text-decoration: underline; }
-code {
-  background: var(--code-bg); padding: .2em .4em; border-radius: 6px;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  font-size: .875em;
-}
-pre {
-  background: var(--code-bg); padding: 1rem; border-radius: 6px;
-  overflow-x: auto; max-width: 100%;
-}
-pre code { background: none; padding: 0; }
-blockquote {
-  margin: 1rem 0; padding: .75rem 1rem; border-left: .25em solid var(--border);
-  background: var(--quote-bg); color: var(--muted); border-radius: 0 6px 6px 0;
-}
-blockquote > :first-child { margin-top: 0; }
-blockquote > :last-child { margin-bottom: 0; }
-/* Wide tables scroll inside their own container so the page never does. */
-.table-scroll { overflow-x: auto; margin: 1rem 0; }
-table { border-collapse: collapse; width: 100%; }
-th, td {
-  border: 1px solid var(--border); padding: .5rem .75rem;
-  text-align: left; vertical-align: top;
-}
-th { background: var(--table-stripe); font-weight: 600; }
-tr:nth-child(2n) td { background: var(--table-stripe); }
-hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }
-/* Diagrams keep their natural size and scroll inside this box, so the page body
-   never scrolls sideways. The SVG is inlined — no script, no network. */
-.diagram {
-  margin: 1.5rem 0; padding: 1rem; overflow-x: auto;
-  border: 1px solid var(--border); border-radius: 6px; background: #ffffff;
-}
-.diagram svg { display: block; margin: 0 auto; height: auto; max-width: none; }
-/* The diagrams are rendered on a light canvas, so they keep a white plate in
-   dark mode rather than becoming unreadable dark-on-dark. */
-@media (prefers-color-scheme: dark) {
-  .diagram { background: #f6f8fa; }
-}
-.build-stamp {
-  margin: 0 auto 2rem; max-width: 980px; color: var(--muted); font-size: .8125rem;
-  border: 1px dashed var(--border); border-radius: 6px; padding: .5rem .75rem;
-}
-.build-stamp code { font-size: .8125em; }
-"""
-
-_TEMPLATE = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
-<!-- {banner}. Source: docs/architecture.md
-     Regenerate: uv run python scripts/build_architecture.py
-     Diagrams are pre-rendered inline SVG (docs/diagrams/). No CDN, no JS. -->
-<style>{css}</style>
-</head>
-<body>
-<div class="build-stamp">
-  <strong>Generated file — do not edit.</strong>
-  Rendered from <code>docs/architecture.md</code> by
-  <code>scripts/build_architecture.py</code>. Built {built}.
-</div>
-<main>
-{body}
-</main>
-</body>
-</html>
-"""
+# The CSS, HTML shell and build-stamp logic live in ``doc_render`` (shared with
+# ``build_docs.py`` so architecture.html / case-study.html / demo.html never drift
+# stylistically). This script keeps only the Mermaid-specific machinery below.
+_SOURCE_REL = "docs/architecture.md"
+_SCRIPT_REL = "scripts/build_architecture.py"
+_REGENERATE = "uv run python scripts/build_architecture.py"
+_HEAD_NOTE = "Diagrams are pre-rendered inline SVG (docs/diagrams/)."
 
 
 def _slug(text: str) -> str:
@@ -302,10 +213,14 @@ def _prune_orphans(text: str) -> list[Path]:
 
 
 def _render_markdown(text: str, diagrams: dict[str, str]) -> str:
-    """Convert markdown to HTML, replacing mermaid fences with inline SVG."""
-    md = MarkdownIt("commonmark", {"html": False, "linkify": False}).enable("table")
+    """Convert markdown to HTML, replacing mermaid fences with inline SVG.
 
-    # add_render_rule binds these to the renderer, so each takes `self` first.
+    Reuses ``doc_render``'s shared table-scroll rules; supplies only the
+    Mermaid-specific fence rule, which is what makes this an *architecture* page
+    rather than a plain doc.
+    """
+
+    # add_render_rule binds this to the renderer, so it takes `self` first.
     def fence(self, tokens, idx, options, env):  # type: ignore[no-untyped-def]
         token = tokens[idx]
         if token.info.strip().lower() == "mermaid":
@@ -313,40 +228,23 @@ def _render_markdown(text: str, diagrams: dict[str, str]) -> str:
             if svg is None:  # pragma: no cover - _ensure_diagrams covers every block
                 raise RuntimeError("a mermaid block reached rendering without an SVG")
             return f'<div class="diagram">{svg}</div>\n'
-        return f"<pre><code>{_escape(token.content)}</code></pre>\n"
+        return f"<pre><code>{doc_render.escape(token.content)}</code></pre>\n"
 
-    def table_open(self, tokens, idx, options, env):  # type: ignore[no-untyped-def]
-        return '<div class="table-scroll"><table>'
-
-    def table_close(self, tokens, idx, options, env):  # type: ignore[no-untyped-def]
-        return "</table></div>"
-
-    md.add_render_rule("fence", fence)
-    md.add_render_rule("table_open", table_open)
-    md.add_render_rule("table_close", table_close)
-    return str(md.render(text))
-
-
-def _escape(text: str) -> str:
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def _title(text: str) -> str:
-    for line in text.splitlines():
-        if line.startswith("# "):
-            return f"{line[2:].strip()} — production-llm-platform"
-    return "Architecture — production-llm-platform"
+    return doc_render.render_markdown(text, fence=fence)
 
 
 def _build(*, built: str, render: bool) -> str:
     source = _SOURCE.read_text(encoding="utf-8")
     diagrams = _ensure_diagrams(source, render=render)
-    return _TEMPLATE.format(
-        title=_escape(_title(source)),
-        css=_CSS,
-        banner=_GENERATED_BANNER,
+    return doc_render.render_page(
+        source_text=source,
+        body_html=_render_markdown(source, diagrams),
         built=built,
-        body=_render_markdown(source, diagrams),
+        source_rel=_SOURCE_REL,
+        script_rel=_SCRIPT_REL,
+        regenerate=_REGENERATE,
+        head_note=_HEAD_NOTE,
+        title_default="Architecture — production-llm-platform",
     )
 
 
@@ -358,14 +256,9 @@ def _existing_build_stamp() -> str | None:
     """
     if not _OUTPUT.is_file():
         return None
-    for line in _OUTPUT.read_text(encoding="utf-8").splitlines():
-        if line.strip().startswith("<code>scripts/build_architecture.py</code>. Built "):
-            return (
-                line.strip()
-                .removeprefix("<code>scripts/build_architecture.py</code>. Built ")
-                .removesuffix(".")
-            )
-    return None
+    return doc_render.recover_build_stamp(
+        _OUTPUT.read_text(encoding="utf-8"), script_rel=_SCRIPT_REL
+    )
 
 
 def main() -> int:

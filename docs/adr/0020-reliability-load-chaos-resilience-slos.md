@@ -214,3 +214,64 @@ up` cannot. The *runtime* proof (the container really loads the test key and a c
 request returns 200) is a documented manual check in `tests/load/README.md`, since a
 unit test cannot reach docker-compose. The chaos runbook's setup was updated to the
 same override (via `COMPOSE_FILE`).
+
+## Addendum 3 (2026-07-27) — the Locust harness now produces real pool-tuning data
+
+Decision 1 shipped Locust, but the harness could not actually deliver the
+pool-tuning data Decision 6 relied on. Found during Stage 9 verification and fixed
+in Stage 10 (a fix to this decision's *implementation*, not a new decision — hence
+an addendum, not a new ADR).
+
+**The gap.** Every simulated user authenticated as the **same single**
+`test-principal`, so they all collided on **one** rate-limit bucket and 429'd
+almost immediately — the load rarely reached the datastore pools at all. The chat
+payload carried no `conversation_id` and never phrased for a tool, so the Postgres
+conversation-cache path (ADR 0008) and Qdrant were never exercised under load. Two
+of the three pool defaults were therefore unverified guesses.
+
+**The fix** (`tests/load/locustfile.py`):
+
+- **20 distinct principals** (`loaduser-0` … `loaduser-19`) so Mode 1 spreads load
+  across 20 rate-limit buckets. Their stored hashes are committed in
+  `config/environments/test.env` (mirrored into `docker-compose.test.yml`; the
+  drift guard `tests/unit/test_load_profile_compose.py` was extended to cover them).
+- **A stateful subset** (~half the `ChatUser`s carry a stable per-user
+  `conversation_id`) that drives the Postgres load/append path + its Redis cache.
+- **A document-search-phrased subset** of prompts (see the ceiling below).
+
+**Deviation from the prompt, recorded.** The prompt said to mint the keys with
+`scripts/generate_api_key.py`. That script mints **random** `token_urlsafe(32)`
+keys for issuing to real principals out-of-band; a random high-entropy key
+committed to `test.env`/the locustfile would **trip the gitleaks gate** (ADR 0019),
+whose allowlist is keyed on the fake-credential *convention* (`test-raw-key-…`,
+`not-a-real`), not on paths. So the keys were minted with the **same underlying
+function** the script wraps — `services.security.auth.hash_key`, pepper
+`test-pepper-not-a-real-secret` — over deterministic convention names
+(`test-raw-key-loaduser-{i}`) the locustfile rebuilds. Same minting primitive,
+gitleaks-safe committed form.
+
+**The cost-free ceiling, stated.** Under Mode 1 the scripted `LLMClient` echoes and
+never emits a `tool_use` block, so the document-search-phrased prompts do **not**
+reach Qdrant's *query* pool — that needs a real model (Mode 2). Under Mode 1
+Qdrant's pool still sees the `/ready → get_collections` probe traffic. Making the
+scripted client tool-call on a phrase would be new orchestrator logic, out of the
+portfolio stage's scope.
+
+**Observed under the fixed harness** (Mode 1, `test` stack, 60 users — 30 `ChatUser`
++ 30 `ProbeUser` — spawn-rate 10/s, 2 min):
+
+| Signal | Result |
+|--------|--------|
+| chat | 1580 reqs, 22.3% `429` (rate limiter working **per-principal** — a single shared bucket would be ~100% `429`), p50 16 ms / p95 90 ms / p99 140 ms |
+| chat-stream | 155 reqs, 18% `429` |
+| /health · /ready | 2656 + 863 reqs, **0% failures** (p99 21 ms / 60 ms) |
+| Postgres | **18 conversations / 1584 messages** persisted — the conversation-cache path is genuinely exercised now (the old harness: zero) |
+| Errors | **0 ERROR-level lines, 0 pool timeouts, 0 `500`s, 0 `ratelimit.degraded`** (Redis stayed up; fail-open never falsely fired) |
+
+**Pool-default decision: confirmed, not changed.** With the pools genuinely under
+load, nothing queued, starved or timed out: the chat path held a sub-150 ms p99 and
+the probes never failed, so there is no evidence to raise `db_pool_max_size` (10),
+`redis_pool_max_connections` (10) or `qdrant_pool_max_connections` (10) — the Stage
+9 defaults are adequate for this workload. Raising them without a bottleneck to
+justify it would be cargo-culting. Revisit if Mode 2 (real model, higher per-request
+latency holding pool connections longer) or a higher concurrency target shows queuing.

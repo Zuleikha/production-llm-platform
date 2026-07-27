@@ -32,6 +32,7 @@ Every ADR uses: **Context** (the forces at play) → **Decision** (what we chose
 | [0017](0017-rag-evaluation-and-regression-gate.md) | RAG evaluation: recall@k/MRR, CI-vs-opt-in two-tier split, regression baseline | Accepted | 6 |
 | [0018](0018-kubernetes-and-terraform.md) | Kubernetes via Helm, dev-mode vs Terraform-managed datastores, validate-not-apply AWS Terraform | Accepted | 7 |
 | [0019](0019-api-authentication-rate-limiting-and-guardrails.md) | API-key auth, single-tier authZ, Redis rate limiting, two RAG-hardening guardrails, CI-only secret scanning | Accepted | 8 |
+| [0020](0020-reliability-load-chaos-resilience-slos.md) | Reliability: circuit breaker, prompt caching, context windowing, pool tuning, load & chaos testing, the OTel metrics pipeline, and SLOs | Accepted | 9 |
 
 ## Conventions
 

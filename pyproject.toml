@@ -77,6 +77,13 @@ dependencies = [
     # qdrant-client over `grpcio`'s version range. The collector receives both
     # protocols, so nothing downstream depends on the choice. See ADR 0016.
     "opentelemetry-exporter-otlp-proto-http==1.43.0",
+    # Imported directly by tests/unit/test_load_profile_compose.py (Stage 9) to
+    # parse the docker-compose override as the drift guard's fixture — a direct
+    # use, but present only transitively (via llama-index-core, opentelemetry, …)
+    # until now. Declared explicitly at the currently-locked version so it can
+    # never silently vanish from the resolved tree, the same latent-risk fix
+    # already applied to `sniffio` above (Stage 10 housekeeping).
+    "pyyaml==6.0.3",
 ]
 
 [project.optional-dependencies]

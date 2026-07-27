@@ -96,7 +96,12 @@ class TestApiKeyAuth:
 
     def test_build_auth_provider_uses_the_test_profile_key(self, settings: Settings) -> None:
         provider = build_auth_provider(settings)
-        assert provider.principal_count == 1
+        # The provider must load *every* principal the test profile configures, not
+        # a fixed count: Stage 10 added 20 load-test principals to test.env
+        # (loaduser-*, ADR 0020 addendum 3), so assert against the configured store
+        # rather than a magic number that silently breaks when principals change.
+        assert settings.api_keys is not None
+        assert provider.principal_count == len(parse_key_store(settings.api_keys))
 
     async def test_build_auth_provider_authenticates_the_test_key(self, settings: Settings) -> None:
         provider = build_auth_provider(settings)

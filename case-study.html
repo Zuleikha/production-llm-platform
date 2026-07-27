@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Case study — a production-grade LLM platform, built in ten stages — production-llm-platform</title>
+<!-- GENERATED FILE - DO NOT EDIT. Source: docs/case-study.md
+     Regenerate: uv run python scripts/build_docs.py
+     Pre-rendered from its markdown source (ADR 0010). No CDN, no JS. -->
+<style>
+:root {
+  --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --border: #d1d9e0;
+  --accent: #0969da; --code-bg: #f6f8fa; --quote-bg: #f6f8fa;
+  --table-stripe: #f6f8fa;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --border: #3d444d;
+    --accent: #4493f8; --code-bg: #151b23; --quote-bg: #151b23;
+    --table-stripe: #151b23;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 2rem 1rem 6rem; background: var(--bg); color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans",
+               Helvetica, Arial, sans-serif;
+  line-height: 1.6; font-size: 16px;
+}
+main { max-width: 980px; margin: 0 auto; }
+h1, h2, h3 { line-height: 1.25; margin-top: 2rem; margin-bottom: 1rem; font-weight: 600; }
+h1 { font-size: 2rem; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+h2 { font-size: 1.5rem; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+h3 { font-size: 1.25rem; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+  background: var(--code-bg); padding: .2em .4em; border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: .875em;
+}
+pre {
+  background: var(--code-bg); padding: 1rem; border-radius: 6px;
+  overflow-x: auto; max-width: 100%;
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: 1rem 0; padding: .75rem 1rem; border-left: .25em solid var(--border);
+  background: var(--quote-bg); color: var(--muted); border-radius: 0 6px 6px 0;
+}
+blockquote > :first-child { margin-top: 0; }
+blockquote > :last-child { margin-bottom: 0; }
+/* Wide tables scroll inside their own container so the page never does. */
+.table-scroll { overflow-x: auto; margin: 1rem 0; }
+table { border-collapse: collapse; width: 100%; }
+th, td {
+  border: 1px solid var(--border); padding: .5rem .75rem;
+  text-align: left; vertical-align: top;
+}
+th { background: var(--table-stripe); font-weight: 600; }
+tr:nth-child(2n) td { background: var(--table-stripe); }
+hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }
+/* Diagrams keep their natural size and scroll inside this box, so the page body
+   never scrolls sideways. The SVG is inlined — no script, no network. */
+.diagram {
+  margin: 1.5rem 0; padding: 1rem; overflow-x: auto;
+  border: 1px solid var(--border); border-radius: 6px; background: #ffffff;
+}
+.diagram svg { display: block; margin: 0 auto; height: auto; max-width: none; }
+/* The diagrams are rendered on a light canvas, so they keep a white plate in
+   dark mode rather than becoming unreadable dark-on-dark. */
+@media (prefers-color-scheme: dark) {
+  .diagram { background: #f6f8fa; }
+}
+.build-stamp {
+  margin: 0 auto 2rem; max-width: 980px; color: var(--muted); font-size: .8125rem;
+  border: 1px dashed var(--border); border-radius: 6px; padding: .5rem .75rem;
+}
+.build-stamp code { font-size: .8125em; }
+</style>
+</head>
+<body>
+<div class="build-stamp">
+  <strong>Generated file — do not edit.</strong>
+  Rendered from <code>docs/case-study.md</code> by
+  <code>scripts/build_docs.py</code>. Built 2026-07-27.
+</div>
+<main>
+<h1>Case study — a production-grade LLM platform, built in ten stages</h1>
+<p><strong>Audience:</strong> an ML / AI platform engineering reviewer assessing production rigor.
+<strong>Claim:</strong> this repository is not a demo of an LLM call — it is a demonstration of
+the <em>engineering around</em> an LLM call: the seams, the failure modes, the tests, the
+deployment, and the decisions that were deliberately <strong>not</strong> taken. This document
+tells that story through the decision trail (<code>docs/adr/</code>), not as a feature list —
+<code>PROJECT_STATUS.md</code> and <code>docs/architecture.md</code> already hold the feature-by-feature
+state.</p>
+<p>Everything below is backed by a committed ADR, a test, or a log line. Where
+something was deliberately not built, it says so as plainly as <code>PROJECT_STATUS.md</code>
+does.</p>
+<hr />
+<h2>What it is</h2>
+<p>A FastAPI service exposing one substantive endpoint —
+<code>POST /v1/chat/completions</code>, OpenAI-shaped — behind which sits a <strong>real LangGraph
+agent loop against the Anthropic API</strong> (<code>claude-opus-4-8</code>): reason → call a tool →
+observe → answer, bounded by a step cap, with the model's own token counts summed
+across the run. Answers can be <strong>grounded</strong> in a document corpus (LlamaIndex
+chunking → Voyage embeddings → Qdrant) and carry typed <strong>citations</strong>. Conversation
+state persists to Postgres behind a Redis read-through cache. The whole thing is
+authenticated, rate-limited, traced, deployed to Kubernetes via Helm, and wrapped
+in a circuit breaker.</p>
+<p>The point of interest for a reviewer is not any one of those — it is that each was
+added <strong>without re-cutting a seam</strong>, and each came with a decision recorded about
+the trade-off accepted.</p>
+<h2>The through-line: stable seams, filled in stage by stage</h2>
+<p>The architecture was cut once, in Stages 1–2, around a handful of protocols:
+<code>CompletionEngine</code> (the model seam), <code>LLMClient</code> (the provider seam), <code>Tool</code> (the
+capability seam), <code>EmbeddingsClient</code>, <code>Datastore</code>, <code>get_settings()</code> (config), and
+<code>@traced</code> (observability). <strong>Every later stage filled a seam; none re-cut one.</strong>
+That is the load-bearing claim, and it is checkable:</p>
+<div class="table-scroll"><table><thead>
+<tr>
+<th style="text-align:center">Stage</th>
+<th>Production concern added</th>
+<th>Seam it leaned on</th>
+<th>Evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:center">1</td>
+<td>Foundation, config, logging, <code>@traced</code></td>
+<td>—</td>
+<td>ADR 0001–0003</td>
+</tr>
+<tr>
+<td style="text-align:center">2</td>
+<td>HTTP API, SSE, pooled datastores, readiness</td>
+<td><code>CompletionEngine</code>, <code>Datastore</code></td>
+<td>ADR 0004–0005</td>
+</tr>
+<tr>
+<td style="text-align:center">3</td>
+<td>Real agent loop (LangGraph + Anthropic), conversation state</td>
+<td><code>CompletionEngine</code> swap — routes unchanged</td>
+<td>ADR 0006–0009</td>
+</tr>
+<tr>
+<td style="text-align:center">4</td>
+<td>RAG grounding + citations</td>
+<td>retrieval slotted in as one more <code>Tool</code></td>
+<td>ADR 0011–0014</td>
+</tr>
+<tr>
+<td style="text-align:center">5</td>
+<td>Distributed tracing → Tempo</td>
+<td><code>@traced</code> — not one of ~30 call sites changed</td>
+<td>ADR 0016</td>
+</tr>
+<tr>
+<td style="text-align:center">6</td>
+<td>RAG evaluation + CI regression gate</td>
+<td>operator-script shape (like ingest)</td>
+<td>ADR 0017</td>
+</tr>
+<tr>
+<td style="text-align:center">7</td>
+<td>Kubernetes (Helm) + Terraform</td>
+<td>probes on the existing <code>/health</code>/<code>/ready</code></td>
+<td>ADR 0018</td>
+</tr>
+<tr>
+<td style="text-align:center">8</td>
+<td>AuthN, rate limiting, RAG guardrails, secret scanning</td>
+<td>middleware over the one endpoint</td>
+<td>ADR 0019</td>
+</tr>
+<tr>
+<td style="text-align:center">9</td>
+<td>Circuit breaker, prompt caching, context windowing, SLOs</td>
+<td><code>LLMClient</code> wrapper — wire shape unchanged</td>
+<td>ADR 0020</td>
+</tr>
+<tr>
+<td style="text-align:center">10</td>
+<td>Portfolio: docs, demo, this case study</td>
+<td>—</td>
+<td>—</td>
+</tr>
+</tbody>
+</table></div><p>When Stage 3 replaced Stage 2's <code>EchoEngine</code> with a real agent, the routes, the
+schemas and the SSE framing did not change shape. When Stage 4 added grounding, the
+wire <em>gained</em> a <code>citations</code> field and nothing else moved. When Stage 5 gave
+<code>@traced</code> a real OpenTelemetry backend, the ~30 decorated functions were untouched —
+the SDK was installed underneath them via the global provider. That is what a seam
+is <em>for</em>, and it is the single thing this repo is built to show.</p>
+<h2>The decisions most worth a reviewer's attention</h2>
+<h3>1. LangChain was rejected, twice, for the same reason</h3>
+<p>Stage 3 uses <code>langgraph</code> for the agent state machine but <strong>not</strong> <code>langchain</code>: the
+graph calls the Anthropic SDK directly, so LangChain's core abstractions buy
+nothing and cost a large transitive tree (ADR 0006). Stage 4 made the identical
+call against the <code>llama-index</code> meta-package — it pulls in a <em>rival vendor's</em> SDK
+(<code>llama-index-llms-openai</code>) to run an Anthropic + Voyage stack — and promoted only
+<code>llama-index-core</code>, from which just the two ingestion primitives are used (ADR
+0011). Both are in <code>pyproject.toml</code> as commented reasoning, not folklore. The
+signal: dependencies are chosen for what is on the request path, not for what a
+tutorial reaches for.</p>
+<h3>2. The hermetic-seam pattern, reused across three external vendors</h3>
+<p>The most reused idea in the codebase. The <code>test</code> profile <strong>cannot construct</strong> a
+real client for any paid external hop: <code>AnthropicClient</code> (ADR 0009),
+<code>VoyageEmbeddingsClient</code> (ADR 0011), <em>and</em> <code>OTLPTracerProvider</code> (ADR 0016) each
+<strong>raise in their constructor</strong> under the <code>test</code> profile, before an endpoint or key
+is read. The guard is keyed on the <em>profile</em>, not on the key's absence — so no test
+can spend money or dial out regardless of what is in the environment, and CI needs
+no <code>ANTHROPIC_API_KEY</code>, no <code>VOYAGE_API_KEY</code>, and no collector. The escape hatch is a
+single, double-gated live contract test (<code>RUN_LIVE_CONTRACT_TESTS=1</code> + a key) that a
+human runs deliberately when changing <code>llm.py</code>/<code>embeddings.py</code> (ADR 0015), because
+the hermetic suite <em>cannot</em> catch a wrong belief about the real API's shape. This is
+the pattern a reviewer should weigh: the same structural guard, applied uniformly,
+the moment a third vendor appeared.</p>
+<h3>3. The rate limiter fails <strong>open</strong>, on purpose</h3>
+<p>A Redis outage makes the per-principal rate limiter <strong>fail open</strong> — it allows the
+request and logs <code>ratelimit.degraded</code> (ADR 0019, on the ADR 0008 precedent). This is
+a deliberate availability-over-enforcement choice for a rate limiter that is a cost
+control, not a security boundary: a Redis blip should not take down a working,
+<em>authenticated</em> endpoint. It is not silent — Stage 9 added a
+<code>rate_limiter_fail_open_total</code> counter and an SLO alert so the degradation is
+visible (ADR 0020). The same fail-toward-availability judgement recurs: a datastore
+down at boot yields an un-ready pod, not a crash loop (ADR 0005); a Redis cache miss
+degrades to a Postgres read, the one sanctioned exception to fail-loud (ADR 0008); a
+retrieval below the score floor returns no sources rather than weak noise (ADR 0013).
+Each is a <em>stated</em> exception to the project's otherwise strict fail-loud rule.</p>
+<h3>4. Terraform is validated, never applied</h3>
+<p>The AWS Terraform (VPC / EKS / RDS / ElastiCache / S3 / Secrets Manager) is
+<strong>written and validated but never applied</strong> — <code>init</code> + <code>validate</code> + <code>fmt -check</code> are
+the CI-safe gate; <code>plan</code>/<code>apply</code> need real AWS credentials this project does not have
+(ADR 0018). This is the <em>same boundary</em> the project draws around paid LLM APIs: the
+code is real and checkable, the spend is not incurred. A reviewer gets to see the
+infrastructure-as-code competence without the repo pretending to a cloud account it
+lacks. The Kubernetes path is not merely templated, though — it is verified
+end-to-end on a real local <code>kind</code> cluster where <code>/ready</code> reports all three
+datastores <code>ok</code>.</p>
+<h3>5. Retrieved text is treated as untrusted, structurally</h3>
+<p>The first tool whose output is not a pure function of its input — <code>document_search</code>
+— returns text that could be attacker-influenced. It is fenced behind a <strong>per-call
+random nonce</strong> and labelled as untrusted reference data (ADR 0014); citations are
+carried out as <em>typed</em> data, never parsed back out of the text the model saw, so a
+document cannot forge its own provenance (ADR 0013). Stage 8 added heuristic
+input/excerpt/egress guardrails <em>on top</em> — but the ADR explicitly keeps the nonce
+fence as the load-bearing control and calls the heuristics evadable signal, not a
+boundary (ADR 0019). The honesty about what is and isn't a real mitigation is the
+point.</p>
+<h2>What is deliberately <strong>not</strong> built</h2>
+<p>Pulled from <code>PROJECT_STATUS.md</code>'s standing deferred lists — stated here so a
+reviewer does not have to infer scope from absence:</p>
+<ul>
+<li><strong>Per-conversation concurrency control.</strong> Two concurrent turns on one
+<code>conversation_id</code> collide on <code>(conversation_id, position)</code>; the second fails
+loudly rather than being serialised (ADR 0008's known gap, out of Stage 9's
+scope).</li>
+<li><strong>Circuit breaking around the Voyage call.</strong> Only the Anthropic call is wrapped;
+a Voyage outage degrades to ungrounded answers already (ADR 0020).</li>
+<li><strong>Context compaction is windowing, not summarization</strong> — a long conversation
+drops its oldest turns from the <em>outbound</em> model call (full history still
+persisted), rather than paying for a second summarizing model call (ADR 0020).</li>
+<li><strong>Auth is API-key only</strong> — no JWT / OAuth / external IdP, no rotation/expiry
+beyond editing <code>API_KEYS</code>, single-tier authZ (ADR 0019).</li>
+<li><strong>Secret management is CI-scanning only</strong> (gitleaks + pip-audit) — no runtime
+secrets backend (ADR 0019).</li>
+<li><strong>Retrieval is deliberately minimal</strong> — no reranking, no hybrid search, no query
+expansion, no automatic re-ingestion; editing a document shorter orphans its tail
+chunks, since ingestion is upsert-only (ADR 0012).</li>
+<li><strong>No ML injection classifier and no per-source trust tiers</strong> — those wait on the
+corpus-admission model changing from committer-only (ADR 0014/0019).</li>
+<li><strong>Evaluation covers RAG retrieval only</strong> (recall@k / MRR) — agent tool-use and
+open-ended chat quality have no fixture corpus to grade against (ADR 0017).</li>
+<li><strong>Pagination conventions</strong> — deferred until an endpoint returns a collection.</li>
+</ul>
+<h2>Known open issues carried into the final state</h2>
+<p>Stated, not buried — the same posture <code>PROJECT_STATUS.md</code> takes:</p>
+<ul>
+<li><strong><code>request_id: null</code> on the Postgres-down <code>500</code>.</strong> When Postgres is down
+mid-conversation (chaos-runbook scenario 1), the resulting <code>500</code> carries a null
+<code>request_id</code> instead of the request's id. It is almost certainly pre-existing
+(predates Stage 9's reliability work) and was <strong>explicitly not chased down</strong> — the
+fix is not worth the Stage 10 scope, and it is recorded here as an accepted,
+deferred item rather than silently dropped.</li>
+<li><strong><code>/ready</code> does not check schema version</strong> — a failed migration leaves the service
+reporting ready while every chat query fails (ADR 0007).</li>
+<li><strong>A datastore that fails <code>connect</code> at boot stays <code>unavailable</code> until restart</strong> —
+there is no runtime reconnect of a pool that never opened.</li>
+<li><strong>The <code>422</code> envelope stringifies Pydantic's raw error list</strong> into <code>message</code>.</li>
+</ul>
+<h2>How to see it working</h2>
+<ul>
+<li><code>docs/demo.md</code> — a scripted walkthrough (<code>scripts/demo.sh</code>) with <strong>real captured
+output</strong>: authenticated chat, SSE streaming, the citations field, the uniform
+<code>401</code>, a real <code>429</code>, and the circuit-breaker contract.</li>
+<li><code>docs/architecture.md</code> — the visual architecture (regenerated <code>architecture.html</code>
+at the repo root), including a single request-lifecycle diagram showing every
+production gate a chat request passes.</li>
+<li><code>docs/adr/</code> — the twenty decisions, each with the trade-off it accepted.</li>
+<li><code>docs/verification-log/</code> — each stage's <em>independent</em> verification, separate from
+the build-time self-report.</li>
+<li>The load story: ADR 0020 addendum 3 records a real Locust run (60 users) against
+the <code>test</code> stack — zero pool timeouts, a sub-150 ms chat p99, and the
+per-principal rate limiter cutting in exactly at threshold.</li>
+</ul>
+
+</main>
+</body>
+</html>

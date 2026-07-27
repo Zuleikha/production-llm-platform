@@ -34,8 +34,10 @@ services:
   api:
     environment:
       ENVIRONMENT: test
-      # Fixed test-principal fixture — mirrors config/environments/test.env.
-      API_KEYS: test-principal:231965b3b3f3d6030b500d21b1984e72dbba04d4af29ceacae9bb3a1ee435034
+      # Fixed test-principal fixture + 20 load principals (Stage 10, ADR 0020
+      # addendum 3) — mirrors config/environments/test.env EXACTLY. Drift guard:
+      # tests/unit/test_load_profile_compose.py.
+      API_KEYS: test-principal:231965b3b3f3d6030b500d21b1984e72dbba04d4af29ceacae9bb3a1ee435034,loaduser-0:2ac1d3d609d59befc7499ebb0225f070bdd05a7d06fca0936f4f10edb67ce028,loaduser-1:976f248145aefaf24c398dd2f4a9eefa4c5fa5389bfa60daff6015af2356563f,loaduser-2:7d8e0ac86a0d706ba8eb8b25de9a5a3350b2fcb5f6c883c99ec3834881ec251e,loaduser-3:9bdbd0a8add71c40b708a26b9092a7b6d86b27a651bb569d841663a3784eeb57,loaduser-4:36fcf58c6bd4105021c4227a492a9c90fa624aaecdf3db2c87cd36f8210d6221,loaduser-5:b243373e39ec160172590a8c8774ed045ad657f4eeedddb4c69f3cce0183f363,loaduser-6:9877594dea16caf9236dc3b8d46600ae049b4ff672705e23746831710de09424,loaduser-7:b6f0f2d1bca494eb64feafb8894da81f78cd0b62e529202856305c7ad7520446,loaduser-8:ac8684f6a8cd200b74b5190cc641b76a5c360865c9b41694d5b15fb5cad133ea,loaduser-9:a0d6639eaa56f296e085056e86718aaa6e8fceef75bc37adc23a1219dbc29991,loaduser-10:59e78a13a91e5159edf31de7573b36dcd20483c4d54f7b2cf3cc579e132686a8,loaduser-11:963cc6a496a521a08701ae97813ab1fab814e45a6fc7bba71b308f2141f8437a,loaduser-12:9cc5932be6971fdb64c7f361d8ff724a38b5955465eb5db97d822be0d5f5955b,loaduser-13:5f0689f12a6395dd1b3d603766705b75760193bd2318bc1520579feaf185b6b6,loaduser-14:d6ba2a3921d04946682507a636c093848ed495a46eb346dbc3933ca866cd58de,loaduser-15:8636e7745b0d739f70aa24fe8a32e2828cd46c4ee4f9dbacd5f6c5cfd41b3d54,loaduser-16:52133f2dc8b892b487836c3fc737de0ea7625635c1c37a6f00305674af4d9ce5,loaduser-17:1756c6c8aece0afb61586c31080e76a4114687fa469a4ae75c41f9efba6aaf3b,loaduser-18:044154c22d79bdcf0ac36717f244a1d25758f4e8f82def0fe2b6b2f9b6b1488c,loaduser-19:6a2e8e7b8a5cc65863d7217c69c46c6bd41a585855b862ceb2807297d422e14e
       API_KEY_HASH_SECRET: test-pepper-not-a-real-secret
       # Unused under the test profile; pinned empty so no real host key is baked in.
       ANTHROPIC_API_KEY: ""

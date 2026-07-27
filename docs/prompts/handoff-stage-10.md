@@ -22,10 +22,11 @@ materials elsewhere.
 
 ## Before any Stage 10 work starts — loose ends from Stage 9
 
-1. **Confirm CI is actually green on the pushed Stage 9 commit** — don't
-   assume it from a clean local gate. If this hasn't been checked yet, check
-   it before treating Stage 9 as closed.
-2. **A malformed `ANTHROPIC_API_KEY` in `.env`.** Found during Stage 9
+**Stage 9 is fully closed:** commit `e4eb3e4` pushed to `master`, CI #26
+confirmed green. The items below are real but don't block starting Stage 10 —
+they're operational loose ends, not open verification questions.
+
+1. **A malformed `ANTHROPIC_API_KEY` in `.env`.** Found during Stage 9
    verification: the key reads `ssk-ant-api03-...` — a doubled leading
    character, not a valid key shape (`sk-ant-api03-...`). This is separate
    from Stage 9's code and was never fixed (out of scope for a code
