@@ -3,71 +3,33 @@
 A production-grade LLM platform, built in **10 deliberate stages** — each stage
 adding one layer of real production concern, documented as it goes.
 
-> ### 🚧 Stage 10 of 10 built — pending independent verification
+> ### All 10 stages complete and independently verified
 >
-> All ten stages are built. Stages 1–9 are independently verified; Stage 10
-> (Portfolio) is complete and self-reported, pending its own independent
-> verification. Stage 10 adds
-> **no new platform capability** — it packages the build for review: a scripted
-> demo with real captured output ([docs/demo.md](docs/demo.md), run via
-> [`scripts/demo.sh`](scripts/demo.sh)), a case-study writeup told through the
-> decision trail ([docs/case-study.md](docs/case-study.md)), and a final
-> docs/diagram pass. The description below is the full feature set, Stages 1–9.
->
-> **What exists today:** a FastAPI service whose chat endpoint runs a real
-> **LangGraph agent loop against the Anthropic API** — it reasons, calls tools,
-> observes the results and answers — and **grounds those answers in a retrieved
-> document corpus** (LlamaIndex chunking → Voyage embeddings → **Qdrant**), with a
-> top-level **`citations`** field ([ADR 0013](docs/adr/0013-citation-shape.md))
-> and retrieved text fenced as **untrusted** behind a per-call nonce
-> ([ADR 0014](docs/adr/0014-prompt-injection-mitigation.md)). **Observability is
-> real** ([ADR 0016](docs/adr/0016-observability-stack.md)): every `@traced` call
-> site emits an **OpenTelemetry span** and each request is a root span, exported
-> OTLP/HTTP → **OTel Collector → Grafana Tempo**, with Grafana dashboards and
-> symptom alerts provisioned as code. **The RAG pipeline has an evaluation
-> harness and a CI regression gate**
-> ([ADR 0017](docs/adr/0017-rag-evaluation-and-regression-gate.md)):
-> `scripts/evaluate.py` scores retrieval (recall@k / MRR) over a checked-in dataset
-> using deterministic offline embeddings — a hermetic, **required** CI job that
-> fails the build on a regression; an opt-in LLM-as-judge tier adds faithfulness /
-> citation scoring but never runs in CI. **The API now deploys to Kubernetes**
-> ([ADR 0018](docs/adr/0018-kubernetes-and-terraform.md)): a Helm chart
-> (`infrastructure/kubernetes/helm/`) with liveness/readiness probes wired to
-> `/health`/`/ready`, verified end-to-end on a local `kind` cluster; dev-mode
-> in-cluster datastores vs managed ones are gated by `devDependencies.enabled`.
-> AWS Terraform (`infrastructure/terraform/`) provisions VPC/EKS/RDS/ElastiCache/S3
-> — **validated, never applied**. **The chat endpoint is now authenticated**
-> ([ADR 0019](docs/adr/0019-api-authentication-rate-limiting-and-guardrails.md)):
-> a bearer **API key** (only a salted `HMAC-SHA256` is stored; missing/bad/wrong all
-> return the same `401`), a **Redis-backed per-principal rate limiter** (`429`,
-> fail-open on a Redis outage), and heuristic **input/excerpt/egress guardrails** on
-> top of the nonce fence — plus two hermetic CI gates, **gitleaks** (secret scan) and
-> **pip-audit** (dependency scan). **The platform is now hardened for reliability**
-> ([ADR 0020](docs/adr/0020-reliability-load-chaos-resilience-slos.md)): a **circuit
-> breaker** wraps the Anthropic call (trips on transport/5xx only, never a `400`,
-> failing fast with `503 provider_unavailable`), **prompt caching** + deterministic
-> **context-window** trimming keep long conversations and repeated calls cheap,
-> spanmetrics/servicegraph connectors turn on Tempo's **service map**, and two new
-> symptom-level Grafana alerts cover the breaker opening and the rate limiter's
-> fail-open path. An opt-in **Locust harness** (never CI) drives pool tuning and a
-> **chaos runbook** proves Postgres/Redis/Qdrant failure behavior under real
-> concurrent load, not a single curl. Plus everything from Stages 1–3: **real
-> token accounting**, **conversation history in Postgres** behind a **Redis
-> read-through cache**, SSE streaming, health / readiness / version / metrics
-> endpoints, structured JSON logging, typed layered configuration, pooled datastore
-> connections, a Docker Compose stack, and a strict CI quality gate.
->
-> **What does not exist yet:** authentication is **API-key only** — no JWT/OAuth/IdP,
-> no key rotation, single-tier authZ, and no per-source RAG trust tiers (all deferred
-> by decision, [ADR 0019](docs/adr/0019-api-authentication-rate-limiting-and-guardrails.md)).
-> **No per-conversation concurrency control** (two concurrent turns on one
-> conversation collide loudly, not serialised) and **no LLM-based summarization**
-> (windowing was chosen instead, deliberately) — both explicit Stage 9 non-goals,
-> [ADR 0020](docs/adr/0020-reliability-load-chaos-resilience-slos.md). Only the
-> Anthropic call is circuit-broken; Voyage is not. Evaluation covers **RAG retrieval
-> only**. Remaining future-stage components are **interface stubs that raise
-> `NotImplementedError`**.
-> See [docs/architecture.md](docs/architecture.md) for the current-vs-planned split.
+> The final stage added no new platform capability — it packaged the build for
+> review: a scripted demo with real captured output ([docs/demo.md](docs/demo.md)),
+> a case-study writeup ([docs/case-study.md](docs/case-study.md)), and a final
+> docs/diagram pass ([verification log](docs/verification-log/stage-10-portfolio.md)).
+
+**What exists**
+
+- FastAPI service running a real **LangGraph agent loop against the Anthropic API**
+- **RAG** grounding — Voyage embeddings → Qdrant, cited via `citations` ([ADR 0013](docs/adr/0013-citation-shape.md)/[0014](docs/adr/0014-prompt-injection-mitigation.md))
+- **Observability** — OTel → Tempo, Grafana dashboards + alerts ([ADR 0016](docs/adr/0016-observability-stack.md))
+- **RAG eval CI gate** ([ADR 0017](docs/adr/0017-rag-evaluation-and-regression-gate.md))
+- **Kubernetes deployment** — Helm + validated Terraform ([ADR 0018](docs/adr/0018-kubernetes-and-terraform.md))
+- **API-key auth, rate limiting, guardrails** ([ADR 0019](docs/adr/0019-api-authentication-rate-limiting-and-guardrails.md))
+- **Reliability hardening** — circuit breaker, prompt caching, context windowing, SLO alerts, chaos-tested under load ([ADR 0020](docs/adr/0020-reliability-load-chaos-resilience-slos.md))
+- Conversation history (Postgres + Redis cache), SSE streaming, strict CI quality gate
+
+**What doesn't exist**
+
+- JWT/OAuth, key rotation
+- Per-source RAG trust tiers
+- Per-conversation concurrency control
+- LLM-based summarization (windowing was chosen instead)
+- Voyage circuit breaking (only Anthropic is wrapped)
+
+See [docs/architecture.md](docs/architecture.md) for the full current-vs-planned split.
 
 ---
 
@@ -78,26 +40,28 @@ adding one layer of real production concern, documented as it goes.
 | **Reproducible** | Exact `==` pins, committed `uv.lock`, `--frozen` installs — laptop, CI and image resolve identically. |
 | **Observable** | JSON logs with request-id correlation; Prometheus `/metrics`; `@traced` emits real **OpenTelemetry spans** → Collector → Grafana Tempo ([ADR 0016](docs/adr/0016-observability-stack.md)). |
 | **Typed & tested** | mypy `strict` and ruff from commit #1, enforced in CI. The suite is **hermetic by construction** — it cannot call a paid API ([ADR 0009](docs/adr/0009-hermetic-llm-testing.md)). |
-| **Stable seams** | Proven repeatedly, not asserted: Stage 3 replaced the mock engine with a full agent stack behind the same `CompletionEngine` protocol; Stage 4 added retrieval as one more `Tool`; Stage 5 gave `@traced` a real OTel backend without touching a call site. None changed a route or the SSE format. Stage 8 then filled the `AuthProvider`/`Guardrail` contracts (auth, rate limiting, guardrails) as FastAPI dependencies around the same route — again without re-cutting it. Stage 9 wrapped the same `LLMClient` protocol in a circuit breaker (`CircuitBreakingLLMClient`) — `AgentGraph` takes it as a drop-in, no call site changed. |
+| **Stable seams** | Proven repeatedly, not asserted. The mock engine was replaced with a full agent stack behind the same `CompletionEngine` protocol; retrieval arrived as one more `Tool`; `@traced` gained a real OTel backend without touching a call site; auth, rate limiting and guardrails filled the `AuthProvider`/`Guardrail` contracts as FastAPI dependencies around the same route; `CircuitBreakingLLMClient` wrapped the same `LLMClient` protocol as a drop-in for `AgentGraph`. None changed a route, a call site or the SSE format. |
 | **Secure by default** | No secrets in git, env-only credentials, non-root container, errors that never leak internals. |
 | **Honest** | Docs label planned work as planned. Stubs raise instead of faking. |
 
 ## Stack
 
-**Runtime:** Python 3.12 · uv · FastAPI · Pydantic v2 · pydantic-settings · uvicorn · `langgraph==1.2.9` · `anthropic==0.116.0`
-**Retrieval:** `llama-index-core==0.14.23` · `voyageai==0.5.0` · `qdrant-client==1.18.0`
-**Observability:** `opentelemetry-{api,sdk}==1.43.0` · OTLP/HTTP exporter · OTel Collector · Grafana Tempo
-**Data:** PostgreSQL · Redis · Qdrant (holds document vectors as of Stage 4)
-**Ops:** Docker · Docker Compose · Prometheus · Grafana · GitHub Actions · Kubernetes · Helm · Terraform (AWS, validate-only)
-**Quality:** pytest · ruff · mypy (strict) · pre-commit · RAG eval regression gate (Stage 6)
+Versions are pinned in `pyproject.toml` / `uv.lock` — this is the technology list.
 
-Every choice is justified in [ADR 0001](docs/adr/0001-stack-selection.md).
-Two libraries were evaluated and **narrowed** rather than adopted wholesale:
-LangChain was rejected for Stage 3 — the agent graph calls the Anthropic SDK
-directly, so nothing imports it ([ADR 0006](docs/adr/0006-agent-loop-and-orchestration.md)).
-Stage 4 took `llama-index-core`, **not** the `llama-index` meta-package, which
-would have pulled a rival vendor's SDK into the base image to run an Anthropic +
-Voyage stack ([ADR 0011](docs/adr/0011-embeddings-provider.md)).
+**Runtime:** Python 3.12 · uv · FastAPI · Pydantic v2 · pydantic-settings · uvicorn · LangGraph · Anthropic SDK
+**Retrieval:** llama-index-core · voyageai · qdrant-client
+**Observability:** OpenTelemetry API/SDK · OTLP/HTTP exporter · OTel Collector · Grafana Tempo
+**Data:** PostgreSQL · Redis · Qdrant (holds document vectors)
+**Ops:** Docker · Docker Compose · Prometheus · Grafana · GitHub Actions · Kubernetes · Helm · Terraform (AWS, validate-only)
+**Quality:** pytest · ruff · mypy (strict) · pre-commit · RAG eval regression gate
+
+Every choice is justified in [ADR 0001](docs/adr/0001-stack-selection.md). Two
+libraries were evaluated and **narrowed** rather than adopted wholesale: LangChain
+was rejected — the agent graph calls the Anthropic SDK directly, so nothing imports
+it ([ADR 0006](docs/adr/0006-agent-loop-and-orchestration.md)); and `llama-index-core`
+was taken **instead of** the `llama-index` meta-package, which would have pulled a
+rival vendor's SDK into the base image to run an Anthropic + Voyage stack
+([ADR 0011](docs/adr/0011-embeddings-provider.md)).
 
 ## Setup
 
@@ -112,7 +76,7 @@ uv sync
 uv run pre-commit install
 ```
 
-> ⚠️ First time here? Read
+> First time here? Read
 > [Known environment quirks](CLAUDE.md#known-environment-quirks) — cross-drive
 > installs are handled repo-wide by `link-mode = "copy"` in `pyproject.toml`, so
 > a fresh clone is safe on any drive. Do not remove that setting.
@@ -151,50 +115,48 @@ uv run pytest -v            # tests only
 
 ```
 docs/              architecture, ADRs, runbooks, stage summaries, prompts, diagrams,
-                   case-study.md · demo.md (Stage 10)
+                   case-study.md · demo.md
 services/
-  api/             ✅ HTTP surface — routes, schemas, the CompletionEngine seam
-  agents/          ✅ Agent · ToolAgent · ToolRegistry (Stage 3)
-  orchestrator/    ✅ AgentOrchestrator · LangGraph loop · LLM seam · conversations
-  retrieval/       ✅ embeddings seam · Qdrant store · ingest · retriever ·
-                      document_search tool (Stage 4)
-  monitoring/      ✅ tracing seam — OTLP/Local providers, OTel span export (Stage 5)
-  evaluation/      ✅ RetrievalEvaluator · metrics · dataset · baseline · LLM-judge (Stage 6)
-  security/        ✅ ApiKeyAuthProvider · RedisRateLimiter · input/excerpt/egress guardrails (Stage 8)
-shared/            ✅ config · logging · observability · datastores · migrations · version ·
-                      resilience (circuit breaker) · metrics (x-cutting counters) (Stage 9)
-data/corpus/       ✅ the RAG corpus — ingested by scripts/ingest.py (Stage 4)
-data/eval/         ✅ eval dataset + regression baseline — scored by scripts/evaluate.py (Stage 6)
-migrations/        ✅ forward-only raw SQL, applied on startup
+  api/             HTTP surface — routes, schemas, the CompletionEngine seam
+  agents/          Agent · ToolAgent · ToolRegistry
+  orchestrator/    AgentOrchestrator · LangGraph loop · LLM seam · conversations
+  retrieval/       embeddings seam · Qdrant store · ingest · retriever · document_search tool
+  monitoring/      tracing seam — OTLP/Local providers, OTel span export
+  evaluation/      RetrievalEvaluator · metrics · dataset · baseline · LLM-judge
+  security/        ApiKeyAuthProvider · RedisRateLimiter · input/excerpt/egress guardrails
+shared/            config · logging · observability · datastores · migrations · version ·
+                   resilience (circuit breaker) · metrics (x-cutting counters)
+data/corpus/       the RAG corpus — ingested by scripts/ingest.py
+data/eval/         eval dataset + regression baseline — scored by scripts/evaluate.py
+migrations/        forward-only raw SQL, applied on startup
 config/            committed non-secret env profiles (dev/test/prod)
-tests/             ✅ unit tests mirroring the source tree
-tests/load/        ✅ opt-in Locust harness, never CI — pool tuning + chaos load (Stage 9)
+tests/             unit tests mirroring the source tree
+tests/load/        opt-in Locust harness, never CI — pool tuning + chaos load
 examples/          runnable examples
-infrastructure/    docker/ ✅   kubernetes/ ✅ Helm chart, kind-verified (Stage 7)   terraform/ ✅ AWS, validated-never-applied (Stage 7)
-scripts/           helper scripts — ingest.py (costs $ outside test) · evaluate.py (RAG eval gate) ·
-                   demo.sh (scripted end-to-end demo, Stage 10) · generate_api_key.py
+infrastructure/    docker/ · kubernetes/ — Helm chart, kind-verified · terraform/ — AWS,
+                   validated-never-applied
+scripts/           helper scripts — ingest.py (costs $ outside test) · evaluate.py (RAG eval
+                   gate) · demo.sh (scripted end-to-end demo) · generate_api_key.py
 .github/workflows/ CI
 ```
 
-`⬜` = interface stub only: a README contract plus an ABC/Protocol that raises
-`NotImplementedError`.
-
 ## Roadmap
 
-Each stage ends with a summary document at a **fixed** filename:
+All 10 stages complete. Each ends with a summary document at a **fixed** filename,
+paired with its verification log:
 
-| Stage | Name | Summary | Verification | Status |
-|:-----:|------|---------|--------------|--------|
-| 1 | Foundation | [`stage-01-foundation.md`](docs/stage-summaries/stage-01-foundation.md) | [log](docs/verification-log/stage-01-foundation.md) | ✅ complete |
-| 2 | API | [`stage-02-api.md`](docs/stage-summaries/stage-02-api.md) | [log](docs/verification-log/stage-02-api.md) | ✅ complete |
-| 3 | Agents | [`stage-03-agents.md`](docs/stage-summaries/stage-03-agents.md) | [log](docs/verification-log/stage-03-agents.md) | ✅ complete |
-| 4 | RAG | [`stage-04-rag.md`](docs/stage-summaries/stage-04-rag.md) | [log](docs/verification-log/stage-04-rag.md) | ✅ complete |
-| 5 | Observability | [`stage-05-observability.md`](docs/stage-summaries/stage-05-observability.md) | [log](docs/verification-log/stage-05-observability.md) | ✅ complete |
-| 6 | MLOps | [`stage-06-mlops.md`](docs/stage-summaries/stage-06-mlops.md) | [log](docs/verification-log/stage-06-mlops.md) | ✅ complete |
-| 7 | Kubernetes | [`stage-07-kubernetes.md`](docs/stage-summaries/stage-07-kubernetes.md) | [log](docs/verification-log/stage-07-kubernetes.md) | ✅ complete |
-| 8 | Security | [`stage-08-security.md`](docs/stage-summaries/stage-08-security.md) | [log](docs/verification-log/stage-08-security.md) | ✅ complete |
-| 9 | Reliability | [`stage-09-reliability.md`](docs/stage-summaries/stage-09-reliability.md) | [log](docs/verification-log/stage-09-reliability.md) | ✅ complete |
-| 10 | Portfolio | [`stage-10-portfolio.md`](docs/stage-summaries/stage-10-portfolio.md) | pending | ⏳ **built, pending independent verification** |
+| Stage | Summary · Verification |
+|:-----:|------------------------|
+| 1 Foundation | [`stage-01-foundation.md`](docs/stage-summaries/stage-01-foundation.md) · [log](docs/verification-log/stage-01-foundation.md) |
+| 2 API | [`stage-02-api.md`](docs/stage-summaries/stage-02-api.md) · [log](docs/verification-log/stage-02-api.md) |
+| 3 Agents | [`stage-03-agents.md`](docs/stage-summaries/stage-03-agents.md) · [log](docs/verification-log/stage-03-agents.md) |
+| 4 RAG | [`stage-04-rag.md`](docs/stage-summaries/stage-04-rag.md) · [log](docs/verification-log/stage-04-rag.md) |
+| 5 Observability | [`stage-05-observability.md`](docs/stage-summaries/stage-05-observability.md) · [log](docs/verification-log/stage-05-observability.md) |
+| 6 MLOps | [`stage-06-mlops.md`](docs/stage-summaries/stage-06-mlops.md) · [log](docs/verification-log/stage-06-mlops.md) |
+| 7 Kubernetes | [`stage-07-kubernetes.md`](docs/stage-summaries/stage-07-kubernetes.md) · [log](docs/verification-log/stage-07-kubernetes.md) |
+| 8 Security | [`stage-08-security.md`](docs/stage-summaries/stage-08-security.md) · [log](docs/verification-log/stage-08-security.md) |
+| 9 Reliability | [`stage-09-reliability.md`](docs/stage-summaries/stage-09-reliability.md) · [log](docs/verification-log/stage-09-reliability.md) |
+| 10 Portfolio | [`stage-10-portfolio.md`](docs/stage-summaries/stage-10-portfolio.md) · [log](docs/verification-log/stage-10-portfolio.md) |
 
 Live progress: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
 
