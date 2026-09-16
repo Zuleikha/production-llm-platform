@@ -32,6 +32,9 @@ if TYPE_CHECKING:
     from services.api.schemas import ChatMessage, FinishReason
     from services.orchestrator.base import AgentOrchestrator
 
+# Stop reasons that mean the model's reply was cut short, not finished.
+_TRUNCATING_STOP_REASONS = frozenset({"max_tokens", "model_context_window_exceeded"})
+
 
 @dataclass(frozen=True, slots=True)
 class Completion:
@@ -88,12 +91,12 @@ class CompletionEngine(Protocol):
 def _finish_reason(stop_reason: str | None) -> FinishReason:
     """Map the model's stop reason onto the OpenAI-shaped wire value.
 
-    The wire format only has ``stop`` and ``length``; ``max_tokens`` is the one
-    that means the reply was cut short. Everything else — including a tool_use
-    stop that survived the agent loop's step cap — is a completed turn from the
-    client's point of view.
+    The wire format only has ``stop`` and ``length``; ``max_tokens`` and
+    ``model_context_window_exceeded`` are the ones that mean the reply was cut
+    short. Everything else — including a tool_use stop that survived the agent
+    loop's step cap — is a completed turn from the client's point of view.
     """
-    return "length" if stop_reason == "max_tokens" else "stop"
+    return "length" if stop_reason in _TRUNCATING_STOP_REASONS else "stop"
 
 
 class OrchestratorEngine:

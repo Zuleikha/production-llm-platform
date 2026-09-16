@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from shared.config import Settings
 
 # The Anthropic failures that mean "the provider is down", not "the caller sent a
-# bad request". Verified against the pinned anthropic SDK (0.116.0): APITimeoutError
+# bad request". Verified against the pinned anthropic SDK (1.6.0): APITimeoutError
 # subclasses APIConnectionError (transport), and InternalServerError is the 5xx
 # APIStatusError. A 400 (BadRequestError — e.g. the "no sampling params" rejection,
 # ADR 0006) is deliberately absent: it is a caller bug and must not open the
@@ -42,7 +42,15 @@ PROVIDER_DOWN_ERRORS: tuple[type[Exception], ...] = (APIConnectionError, Interna
 _logger = get_logger("orchestrator.llm")
 
 # Why the model stopped. "tool_use" is the signal the agent loop branches on.
-StopReason = Literal["end_turn", "max_tokens", "tool_use", "stop_sequence", "refusal", "pause_turn"]
+StopReason = Literal[
+    "end_turn",
+    "max_tokens",
+    "tool_use",
+    "stop_sequence",
+    "refusal",
+    "pause_turn",
+    "model_context_window_exceeded",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,7 +192,7 @@ class AnthropicClient:
         ``system: str`` / ``tools: Sequence[dict]``; ``_with_cache_control`` turns
         the plain system string into Anthropic's content-block form and marks the
         last tool spec, immediately before the SDK call. Verified against the
-        pinned SDK (anthropic 0.116.0): ``cache_control`` is a GA first-class field
+        pinned SDK (anthropic 1.6.0): ``cache_control`` is a GA first-class field
         on ``TextBlockParam``/``ToolParam`` (``{"type": "ephemeral"}``), needing no
         beta header. A hermetic test can only assert this request *shape*; a real
         cache hit (``cache_read_input_tokens`` > 0) is confirmable only against the
