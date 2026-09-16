@@ -1,0 +1,10 @@
+# pip-audit findings the dependency gate may skip (ADR 0019, addendum 1).
+#
+# Read by scripts/verify.ps1, scripts/verify.sh and the CI pip-audit job; each
+# entry becomes one `--ignore-vuln <id>`. Only for findings with NO patched
+# release that are justified as not reachable here. Remove an entry as soon as a
+# fix ships. tests/unit/test_pip_audit_ignore.py fails once a review-by date passes.
+#
+# Format (one per line): <advisory-id> <review-by YYYY-MM-DD> <reason>
+
+GHSA-8mgp-746c-j5xp 2026-12-16 nltk<=3.10.3, no fix yet; only pathsec-sandboxed model save/load APIs are affected, and we reach nltk solely via llama-index-core sentence splitting with no attacker-chosen paths

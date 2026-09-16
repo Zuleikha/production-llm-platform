@@ -53,11 +53,17 @@ if ($gitleaks) {
     Write-Host "==> Secret scan (gitleaks) - SKIPPED (binary not on PATH or in gl/); CI still enforces it." -ForegroundColor Yellow
 }
 
-# pip-audit: audit exactly what is locked (--frozen), mirroring CI.
+# pip-audit: audit exactly what is locked (--frozen), mirroring CI. Justified,
+# time-boxed skips live in config/pip-audit-ignore.txt (ADR 0019, addendum 1).
 Invoke-Step "Dependency scan (pip-audit)" {
     $req = Join-Path ([System.IO.Path]::GetTempPath()) ("requirements-audit-" + [System.Guid]::NewGuid().ToString("N") + ".txt")
     uv export --frozen --no-emit-project --format requirements-txt | Out-File -Encoding utf8 $req
-    uvx --from pip-audit==2.9.0 pip-audit -r $req
+    $ignoreArgs = @()
+    foreach ($line in (Get-Content "config/pip-audit-ignore.txt")) {
+        if ($line -match '^\s*(#|$)') { continue }
+        $ignoreArgs += @("--ignore-vuln", ($line.Trim() -split '\s+')[0])
+    }
+    uvx --from pip-audit==2.9.0 pip-audit -r $req @ignoreArgs
     Remove-Item -Force $req -ErrorAction SilentlyContinue
 }
 

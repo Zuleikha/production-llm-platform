@@ -149,8 +149,16 @@ jobs:
       - name: Export locked dependencies
         run: uv export --frozen --no-emit-project --format requirements-txt > requirements-audit.txt
 
+      # Justified, time-boxed skips live in config/pip-audit-ignore.txt (ADR 0019,
+      # addendum 1); a unit test fails once any entry passes its review-by date.
       - name: Audit locked dependencies
-        run: uvx --from pip-audit==${{ env.PIP_AUDIT_VERSION }} pip-audit -r requirements-audit.txt
+        run: |
+          set -euo pipefail
+          ignore_args=()
+          while read -r vuln_id _; do
+            ignore_args+=(--ignore-vuln "$vuln_id")
+          done < <(grep -Ev '^[[:space:]]*(#|$)' config/pip-audit-ignore.txt)
+          uvx --from pip-audit==${{ env.PIP_AUDIT_VERSION }} pip-audit -r requirements-audit.txt "${ignore_args[@]}"
 
   docker:
     name: Docker build + health verification
