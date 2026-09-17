@@ -275,3 +275,19 @@ the probes never failed, so there is no evidence to raise `db_pool_max_size` (10
 9 defaults are adequate for this workload. Raising them without a bottleneck to
 justify it would be cargo-culting. Revisit if Mode 2 (real model, higher per-request
 latency holding pool connections longer) or a higher concurrency target shows queuing.
+
+## Addendum 4 (2026-09-16) — re-verified against `anthropic==1.6.0`
+
+The SDK moved from `0.116.0` to `1.6.0`, a major bump that replaces its `httpx`
+transport with `httpx2`. The facts Decisions 1 and 2 rely on were re-checked
+against the installed 1.6.0 package and still hold: `APITimeoutError` subclasses
+`APIConnectionError`; `InternalServerError` is the 5xx `APIStatusError`;
+`BadRequestError` is outside `PROVIDER_DOWN_ERRORS`; and `cache_control` is still a
+first-class field on `TextBlockParam`/`ToolParam`. Test doubles now build
+`httpx2.Request`/`httpx2.Response`. The project's own `httpx==0.28.1` pin stays, for
+the datastore layer.
+
+1.6.0 also adds a stop reason, `model_context_window_exceeded`. It joins
+`StopReason` and maps to the wire value `length`, like `max_tokens`: both mean
+the reply was cut short. A real call on 1.6.0 is still unproven until the opt-in
+live contract test (ADR 0015) runs.

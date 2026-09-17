@@ -167,3 +167,26 @@ does not have.
 - **Secret management is scan-only:** no runtime secrets backend. Env-var
   precedence (ADR 0003) and the validate-never-apply Terraform Secrets Manager
   references (ADR 0018) are unchanged.
+
+## Addendum 1 (2026-09-16) — justified, time-boxed pip-audit ignores
+
+**Problem.** After bumping `aiohttp`, `h2` and `nltk` to clear 23 new advisories,
+one remained: **GHSA-8mgp-746c-j5xp** (`nltk <= 3.10.3`, CVSS 8.3) has **no patched
+release**. Upgrading cannot clear it, so the gate would stay red indefinitely.
+
+**Reachability.** The affected APIs are nltk's model persistence
+(`TransitionParser.train/parse`, `AveragedPerceptron.save/load`,
+`PerceptronTagger.save_to_json`, `save_maxent_params`), exploitable only when
+`pathsec` enforcement is on *and* an attacker controls the file path. This project
+never imports nltk; it arrives transitively through `llama-index-core`, which uses
+only its sentence tokenizers. No attacker-chosen path reaches any affected API.
+
+**Decision.** A finding may be skipped only via `config/pip-audit-ignore.txt`: one
+line per advisory with an id, a **review-by date** and a reason. `verify.ps1`,
+`verify.sh` and the CI job each turn every entry into `--ignore-vuln <id>` — one
+list, no copies. `tests/unit/test_pip_audit_ignore.py` fails on a malformed entry
+or **once a review-by date passes**, so a skip cannot silently become permanent.
+
+**Consequences.** The gate is green again and still fails on any *new* finding.
+The accepted risk is limited to the listed ids. Remove an entry as soon as a fix
+ships; at its review date, either upgrade or re-justify with a new date.

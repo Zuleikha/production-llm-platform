@@ -12,7 +12,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-import httpx
+import httpx2
 import pytest
 from anthropic import APIConnectionError, APITimeoutError, BadRequestError, InternalServerError
 from services.orchestrator.llm import (
@@ -293,7 +293,7 @@ def _provider_breaker(clock: Any, *, threshold: int = 3, cooldown: float = 30.0)
 
 
 def _conn_error() -> APIConnectionError:
-    return APIConnectionError(message="down", request=httpx.Request("POST", "http://x"))
+    return APIConnectionError(message="down", request=httpx2.Request("POST", "http://x"))
 
 
 class _MutableClock:
@@ -306,14 +306,14 @@ class _MutableClock:
 
 class TestProviderDownErrors:
     def test_timeout_and_5xx_qualify_but_a_400_does_not(self) -> None:
-        req = httpx.Request("POST", "http://x")
+        req = httpx2.Request("POST", "http://x")
         assert isinstance(APITimeoutError(request=req), PROVIDER_DOWN_ERRORS)
         assert isinstance(
-            InternalServerError("x", response=httpx.Response(500, request=req), body=None),
+            InternalServerError("x", response=httpx2.Response(500, request=req), body=None),
             PROVIDER_DOWN_ERRORS,
         )
         assert not isinstance(
-            BadRequestError("x", response=httpx.Response(400, request=req), body=None),
+            BadRequestError("x", response=httpx2.Response(400, request=req), body=None),
             PROVIDER_DOWN_ERRORS,
         )
 
@@ -366,8 +366,8 @@ class TestCircuitBreakingLLMClient:
         assert recovered_state is CircuitState.CLOSED
 
     async def test_a_400_does_not_trip_the_breaker(self) -> None:
-        req = httpx.Request("POST", "http://x")
-        bad = BadRequestError("bad", response=httpx.Response(400, request=req), body=None)
+        req = httpx2.Request("POST", "http://x")
+        bad = BadRequestError("bad", response=httpx2.Response(400, request=req), body=None)
         inner = FaultInjectingLLMClient(fail_times=99, error=bad)
         breaker = _provider_breaker(_MutableClock(), threshold=2)
         wrapped = CircuitBreakingLLMClient(inner, breaker)

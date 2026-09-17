@@ -47,11 +47,16 @@ else
   echo "==> Secret scan (gitleaks) - SKIPPED (binary not on PATH or in gl/); CI still enforces it."
 fi
 
-# pip-audit: audit exactly what is locked (--frozen), mirroring CI.
+# pip-audit: audit exactly what is locked (--frozen), mirroring CI. Justified,
+# time-boxed skips live in config/pip-audit-ignore.txt (ADR 0019, addendum 1).
 echo "==> Dependency scan (pip-audit)"
 req="$(mktemp)"
 uv export --frozen --no-emit-project --format requirements-txt >"$req"
-uvx --from pip-audit==2.9.0 pip-audit -r "$req"
+ignore_args=()
+while read -r vuln_id _; do
+  ignore_args+=(--ignore-vuln "$vuln_id")
+done < <(grep -Ev '^[[:space:]]*(#|$)' config/pip-audit-ignore.txt)
+uvx --from pip-audit==2.9.0 pip-audit -r "$req" "${ignore_args[@]}"
 rm -f "$req"
 
 echo

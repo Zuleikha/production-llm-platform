@@ -142,6 +142,26 @@ def test_finish_reason_is_length_when_the_model_hits_the_token_cap(settings: Any
     assert body["usage"]["completion_tokens"] == 2
 
 
+def test_finish_reason_is_length_when_the_context_window_is_exceeded(settings: Any) -> None:
+    """A reply cut short by the context window is truncated too, so it is `length`.
+
+    anthropic 1.6.0 added the `model_context_window_exceeded` stop reason. Mapping
+    it to `stop` would tell the client a cut-off reply was complete.
+    """
+    client = _client_with_turns(
+        settings,
+        AssistantTurn(
+            text="one two",
+            usage=TokenUsage(input_tokens=11, output_tokens=2),
+            stop_reason="model_context_window_exceeded",
+        ),
+    )
+
+    resp = client.post(_ENDPOINT, json={"messages": _messages()})
+
+    assert resp.json()["choices"][0]["finish_reason"] == "length"
+
+
 def test_max_tokens_is_forwarded_to_the_model(settings: Any) -> None:
     """The cap is the API's job now, so it has to actually reach the API."""
     llm = ScriptedLLMClient([AssistantTurn(text="hi", stop_reason="end_turn")])
@@ -214,7 +234,7 @@ def test_usage_sums_every_model_call_in_a_tool_using_run(settings: Any) -> None:
 
 def test_open_circuit_breaker_returns_503_provider_unavailable(settings: Any) -> None:
     """An open breaker renders as a distinct 503, not a 500 or a 401/429 (ADR 0020)."""
-    import httpx
+    import httpx2
     from anthropic import APIConnectionError
     from services.orchestrator.llm import (
         PROVIDER_DOWN_ERRORS,
@@ -228,7 +248,7 @@ def test_open_circuit_breaker_returns_503_provider_unavailable(settings: Any) ->
         cooldown_seconds=999,
         trip_on=PROVIDER_DOWN_ERRORS,
     )
-    breaker.record_failure(APIConnectionError(message="down", request=httpx.Request("POST", "/")))
+    breaker.record_failure(APIConnectionError(message="down", request=httpx2.Request("POST", "/")))
     # Breaker is now open; the wrapped (scripted) client is never reached.
     llm = CircuitBreakingLLMClient(ScriptedLLMClient([_ONE_TURN]), breaker)
     engine = OrchestratorEngine(AgentOrchestrator(AgentGraph(llm), NullConversationStore()))
@@ -253,7 +273,7 @@ def test_non_qualifying_provider_exception_renders_uniform_500_envelope(settings
     `debug=True` below is the trigger; the assertion is that the standard envelope
     still wins and the full trace stays server-side only.
     """
-    import httpx
+    import httpx2
     from anthropic import AuthenticationError
     from services.orchestrator.llm import PROVIDER_DOWN_ERRORS, build_resilient_llm_client
 
@@ -261,7 +281,7 @@ def test_non_qualifying_provider_exception_renders_uniform_500_envelope(settings
 
     auth_error = AuthenticationError(
         "invalid x-api-key",
-        response=httpx.Response(401, request=httpx.Request("POST", "/")),
+        response=httpx2.Response(401, request=httpx2.Request("POST", "/")),
         body=None,
     )
     # Sanity: the breaker must NOT treat this as "provider down" — it passes through.

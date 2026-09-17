@@ -38,7 +38,7 @@ dependencies = [
     # the Anthropic API (ADR 0006). `langchain` was NOT promoted: the graph calls
     # the Anthropic SDK directly, so the LangChain core abstractions buy nothing
     # and cost a large transitive tree. See ADR 0006.
-    "anthropic==0.116.0",
+    "anthropic==1.6.0",
     "langgraph==1.2.9",
     # Retrieval / RAG — promoted out of the `retrieval` extra in Stage 4, when
     # the chat endpoint started grounding answers in retrieved documents and
